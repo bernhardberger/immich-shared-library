@@ -222,9 +222,9 @@ async def _apply_api_update(api: ImmichAPI, asset_id: UUID, field_group: str, va
     if field_group == "taken_at":
         if value.get("dateTimeOriginal") is None:
             return False
-        # Immich v2.7.5 accepts dateTimeOriginal on the single-asset endpoint,
-        # but timeZone only on the bulk endpoint and not alongside dateTimeOriginal.
-        await api.update_asset_metadata(asset_id, dateTimeOriginal=value.get("dateTimeOriginal"))
+        # Immich v2.7.5's bulk endpoint persisted metadata reliably in live
+        # testing. timeZone cannot be sent alongside dateTimeOriginal.
+        await api.update_assets_metadata([asset_id], dateTimeOriginal=value.get("dateTimeOriginal"))
         if value.get("timeZone") is not None:
             await api.update_assets_metadata([asset_id], timeZone=value.get("timeZone"))
         return True
@@ -233,10 +233,10 @@ async def _apply_api_update(api: ImmichAPI, asset_id: UUID, field_group: str, va
         # GPS field is present, so location clears are surfaced as conflicts.
         if value.get("latitude") is None or value.get("longitude") is None:
             return False
-        await api.update_asset_metadata(asset_id, latitude=value.get("latitude"), longitude=value.get("longitude"))
+        await api.update_assets_metadata([asset_id], latitude=value.get("latitude"), longitude=value.get("longitude"))
         return True
     if field_group == "description":
-        await api.update_asset_metadata(asset_id, description="" if value is None else value)
+        await api.update_assets_metadata([asset_id], description="" if value is None else value)
         return True
     raise ValueError(f"unknown metadata field group: {field_group}")
 

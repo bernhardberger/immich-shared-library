@@ -111,11 +111,12 @@ class SharedAlbumMetadataSyncTest(unittest.IsolatedAsyncioTestCase):
 
         stats = await reconcile_shared_album_metadata(conn, api)
 
+        self.assertEqual(api.updates, [])
         self.assertEqual(
-            api.updates,
+            api.bulk_updates,
             [
-                (SOURCE_ASSET, {"description": "Fasching"}),
-                (TARGET_ASSET_2, {"description": "Fasching"}),
+                ([SOURCE_ASSET], {"description": "Fasching"}),
+                ([TARGET_ASSET_2], {"description": "Fasching"}),
             ],
         )
         self.assertEqual(stats["metadata_fields_propagated"], 1)
@@ -132,11 +133,12 @@ class SharedAlbumMetadataSyncTest(unittest.IsolatedAsyncioTestCase):
 
         stats = await reconcile_shared_album_metadata(conn, api)
 
+        self.assertEqual(api.updates, [])
         self.assertEqual(
-            api.updates,
+            api.bulk_updates,
             [
-                (SOURCE_ASSET, {"description": "Kottingbrunn"}),
-                (TARGET_ASSET_2, {"description": "Kottingbrunn"}),
+                ([SOURCE_ASSET], {"description": "Kottingbrunn"}),
+                ([TARGET_ASSET_2], {"description": "Kottingbrunn"}),
             ],
         )
         self.assertEqual(stats["metadata_fields_propagated"], 1)
@@ -156,8 +158,14 @@ class SharedAlbumMetadataSyncTest(unittest.IsolatedAsyncioTestCase):
 
         stats = await reconcile_shared_album_metadata(conn, api)
 
-        self.assertEqual(api.updates, [(TARGET_ASSET_1, {"dateTimeOriginal": new_date.isoformat()})])
-        self.assertEqual(api.bulk_updates, [([TARGET_ASSET_1], {"timeZone": "Europe/Vienna"})])
+        self.assertEqual(api.updates, [])
+        self.assertEqual(
+            api.bulk_updates,
+            [
+                ([TARGET_ASSET_1], {"dateTimeOriginal": new_date.isoformat()}),
+                ([TARGET_ASSET_1], {"timeZone": "Europe/Vienna"}),
+            ],
+        )
         self.assertEqual(stats["metadata_fields_propagated"], 1)
 
     async def test_multiple_different_changed_values_record_conflict_without_api_writes(self) -> None:
@@ -186,11 +194,12 @@ class SharedAlbumMetadataSyncTest(unittest.IsolatedAsyncioTestCase):
 
         stats = await reconcile_shared_album_metadata(conn, api)
 
+        self.assertEqual(api.updates, [])
         self.assertEqual(
-            api.updates,
+            api.bulk_updates,
             [
-                (TARGET_ASSET_1, {"description": ""}),
-                (TARGET_ASSET_2, {"description": ""}),
+                ([TARGET_ASSET_1], {"description": ""}),
+                ([TARGET_ASSET_2], {"description": ""}),
             ],
         )
         self.assertEqual(stats["metadata_fields_propagated"], 1)
