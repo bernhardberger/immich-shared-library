@@ -4,16 +4,24 @@ from uuid import UUID
 from src.album_sync import add_assets_to_album, backfill_album
 from src.asset_sync import find_duplicate_filenames, get_unsynced_source_assets, record_skipped_duplicates, sync_asset
 from src.cleanup import cleanup_deleted_assets, cleanup_reassigned_faces
-from src.config import settings
+from src.config import SYNC_MODE_SHARED_ALBUMS, settings
 from src.db import transaction
+from src.immich_api import ImmichAPI
 from src.ml_sync import sync_faces_for_asset, sync_faces_incremental
 from src.person_sync import cleanup_orphaned_persons, sync_person_names, sync_person_thumbnails, sync_person_visibility
 from src.schema import validate_schema
+from src.shared_album_sync import run_shared_albums_sync
 
 logger = logging.getLogger(__name__)
 
 
-async def run_full_sync() -> dict:
+async def run_full_sync(api: ImmichAPI | None = None) -> dict:
+    if settings.sync_config.sync_mode == SYNC_MODE_SHARED_ALBUMS:
+        return await run_shared_albums_sync(api=api)
+    return await run_path_prefix_sync()
+
+
+async def run_path_prefix_sync() -> dict:
     """Run a complete sync cycle: new assets, faces, person updates, cleanups.
 
     Returns a summary dict of what was done.

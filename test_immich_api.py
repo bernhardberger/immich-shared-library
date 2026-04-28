@@ -19,9 +19,10 @@ LIBRARY_ID = UUID("22222222-2222-2222-2222-222222222222")
 
 
 class FakeResponse:
-    def __init__(self, payload=None, status_code: int = 200) -> None:
+    def __init__(self, payload=None, status_code: int = 200, content: bytes | None = None) -> None:
         self.payload = payload
         self.status_code = status_code
+        self.content = content if content is not None else (b"" if status_code == 204 else b"{}")
         self.raise_for_status_called = False
 
     def json(self):
@@ -123,6 +124,20 @@ class ImmichLibraryAPITest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.calls[0][0:2], ("POST", f"http://immich.example/api/libraries/{LIBRARY_ID}/validate"))
         self.assertEqual(client.calls[1][0:2], ("POST", f"http://immich.example/api/libraries/{LIBRARY_ID}/scan"))
+
+    async def test_validate_and_scan_library_return_none_for_no_content(self) -> None:
+        client = FakeAsyncClient()
+        client.response = FakeResponse(status_code=204)
+        api = self.make_api(client)
+
+        self.assertIsNone(await api.validate_library(LIBRARY_ID))
+        self.assertIsNone(await api.scan_library(LIBRARY_ID))
+
+    async def test_scan_library_returns_none_for_empty_body(self) -> None:
+        client = FakeAsyncClient()
+        client.response = FakeResponse(status_code=200, content=b"")
+
+        self.assertIsNone(await self.make_api(client).scan_library(LIBRARY_ID))
 
 
 if __name__ == "__main__":

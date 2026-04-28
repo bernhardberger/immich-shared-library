@@ -243,11 +243,7 @@ def validate_config() -> bool:
         return False
 
     if config.sync_mode == SYNC_MODE_SHARED_ALBUMS:
-        logger.error(
-            "sync_mode=shared_albums is parsed but runtime album discovery "
-            "is not implemented yet"
-        )
-        return False
+        return True
 
     jobs = config.sync_jobs
     if not jobs:
@@ -266,11 +262,11 @@ def _is_connection_error(exc: Exception) -> bool:
     ))
 
 
-async def sync_loop() -> None:
+async def sync_loop(api: ImmichAPI | None = None) -> None:
     """Main sync loop that periodically syncs assets."""
     while True:
         try:
-            await run_full_sync()
+            await run_full_sync(api=api)
         except Exception as e:
             logger.exception("Error in sync loop")
             if _is_connection_error(e) or (e.__cause__ and _is_connection_error(e.__cause__)):
@@ -305,13 +301,16 @@ async def main() -> None:
 
     logger.info("Starting immich-shared-library sidecar")
     logger.info("Sync interval: %ds", settings.sync_interval_seconds)
-    for job in settings.sync_jobs:
-        logger.info(
-            "Sync job [%s]: source=%s, target=%s, src_prefix=%s, tgt_prefix=%s, album=%s",
-            job.name, job.source_user_id, job.target_user_id,
-            job.source_path_prefix, job.target_path_prefix,
-            job.album_id or "none",
-        )
+    if settings.sync_config.sync_mode == SYNC_MODE_SHARED_ALBUMS:
+        logger.info("Sync mode: shared_albums")
+    else:
+        for job in settings.sync_jobs:
+            logger.info(
+                "Sync job [%s]: source=%s, target=%s, src_prefix=%s, tgt_prefix=%s, album=%s",
+                job.name, job.source_user_id, job.target_user_id,
+                job.source_path_prefix, job.target_path_prefix,
+                job.album_id or "none",
+            )
 
     api = ImmichAPI()
     await wait_for_immich(api)
@@ -324,7 +323,7 @@ async def main() -> None:
     await start_health_server()
 
     try:
-        await sync_loop()
+        await sync_loop(api)
     except asyncio.CancelledError:
         logger.info("Shutting down...")
     finally:
