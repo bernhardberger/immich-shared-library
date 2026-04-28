@@ -37,6 +37,9 @@ class FakeConnection:
         self.fetch_calls.append((sql, args))
         if "FROM asset_file" in sql:
             return self.files
+        if args and "starts_with(a.\"originalPath\"" in sql:
+            prefix = str(args[0])
+            return [row for row in self.rows if str(row["originalPath"]).startswith(prefix)]
         return self.rows
 
     async def execute(self, sql, *args):
@@ -137,6 +140,22 @@ class SharedAlbumCleanupTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cleaned, 0)
             remove_hardlinks.assert_not_called()
             self.assertEqual(conn.execute_calls, [])
+
+    async def test_legacy_path_prefix_mapping_is_filtered_before_path_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = shadow_config(temp_dir)
+            conn = FakeConnection([
+                orphan_row("/mnt/external/shared-pilot/bberger-camera/IMG_0001.JPG")
+            ])
+
+            with self.assertNoLogs("src.shared_album_cleanup", level="WARNING"):
+                with patch("src.shared_album_cleanup.remove_hardlinks") as remove_hardlinks:
+                    cleaned = await cleanup_orphaned_shared_album_assets(conn, config)
+
+            self.assertEqual(cleaned, 0)
+            remove_hardlinks.assert_not_called()
+            self.assertEqual(conn.execute_calls, [])
+            self.assertEqual(conn.fetch_calls[0][1], (f"{config.import_path_prefix}/",))
 
     async def test_target_asset_under_different_user_shadow_prefix_is_not_deleted(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -46,6 +46,7 @@ async def cleanup_orphaned_shared_album_assets(
         JOIN asset a ON a.id = m.target_asset_id
         JOIN library l ON l.id = a."libraryId"
         LEFT JOIN _face_sync_album_map am ON am.target_asset_id = m.target_asset_id
+        WHERE starts_with(a."originalPath", $1)
         GROUP BY
             m.source_asset_id,
             m.target_asset_id,
@@ -56,6 +57,7 @@ async def cleanup_orphaned_shared_album_assets(
             l."ownerId"
         HAVING COUNT(am.target_asset_id) = 0
         """,
+        f"{shadow_config.import_path_prefix}/",
     )
 
     cleaned = 0
