@@ -20,7 +20,12 @@ FIELD_GROUPS = ("taken_at", "location", "description")
 _UNINITIALIZED = object()
 
 
-async def reconcile_shared_album_metadata(conn: asyncpg.Connection, api: ImmichAPI) -> dict[str, int]:
+async def reconcile_shared_album_metadata(
+    conn: asyncpg.Connection,
+    api: ImmichAPI,
+    *,
+    source_asset_ids: set[UUID] | None = None,
+) -> dict[str, int]:
     """Reconcile first-slice shared metadata for shared-album logical photos."""
     stats = {
         "metadata_fields_initialized": 0,
@@ -28,7 +33,7 @@ async def reconcile_shared_album_metadata(conn: asyncpg.Connection, api: ImmichA
         "metadata_conflicts": 0,
         "metadata_assets_updated": 0,
     }
-    rows = await fetch_shared_album_metadata_rows(conn)
+    rows = await fetch_shared_album_metadata_rows(conn, source_asset_ids=source_asset_ids)
     if not rows:
         return stats
 
@@ -107,7 +112,11 @@ async def reconcile_shared_album_metadata(conn: asyncpg.Connection, api: ImmichA
     return stats
 
 
-async def fetch_shared_album_metadata_rows(conn: asyncpg.Connection) -> list[Mapping[str, Any]]:
+async def fetch_shared_album_metadata_rows(
+    conn: asyncpg.Connection,
+    *,
+    source_asset_ids: set[UUID] | None = None,
+) -> list[Mapping[str, Any]]:
     """Fetch only shared-album-justified logical photos and their mirrors."""
     return await conn.fetch(
         """
@@ -132,8 +141,10 @@ async def fetch_shared_album_metadata_rows(conn: asyncpg.Connection) -> list[Map
         WHERE a."deletedAt" IS NULL
           AND COALESCE(a."isOffline", FALSE) = FALSE
           AND (a.status IS NULL OR a.status = 'active')
+          AND ($1::uuid[] IS NULL OR la.source_asset_id = ANY($1::uuid[]))
         ORDER BY la.source_asset_id, la.asset_id
-        """
+        """,
+        list(source_asset_ids) if source_asset_ids is not None else None,
     )
 
 
@@ -261,7 +272,9 @@ async def _apply_db_metadata_update(
     value: Any,
 ) -> None:
     """Fallback for mirror rows the Immich API key cannot update."""
+    await conn.execute("SET LOCAL immich_shared_sidecar.suppress_events = 'on'")
     if field_group == "taken_at":
+        taken_at = value.get("dateTimeOriginal")
         await conn.execute(
             """
             UPDATE asset_exif
@@ -271,8 +284,18 @@ async def _apply_db_metadata_update(
             WHERE "assetId" = $1
             """,
             asset_id,
-            value.get("dateTimeOriginal"),
+            taken_at,
             value.get("timeZone"),
+        )
+        await conn.execute(
+            """
+            UPDATE asset
+            SET "fileCreatedAt" = $2,
+                "localDateTime" = $2
+            WHERE id = $1
+            """,
+            asset_id,
+            taken_at,
         )
         return
     if field_group == "location":

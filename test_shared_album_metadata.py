@@ -245,6 +245,10 @@ class SharedAlbumMetadataSyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(fallback_calls), 1)
         self.assertIn('description = $2', fallback_calls[0][0])
         self.assertEqual(fallback_calls[0][1], (TARGET_ASSET_1, "Fasching"))
+        self.assertEqual([call for call in conn.execute_calls if 'UPDATE asset\n' in call[0]], [])
+        suppress_calls = [call for call in conn.execute_calls if 'suppress_events' in call[0]]
+        self.assertEqual(len(suppress_calls), 1)
+        self.assertLess(conn.execute_calls.index(suppress_calls[0]), conn.execute_calls.index(fallback_calls[0]))
         state_calls = [call for call in conn.execute_calls if 'INSERT INTO _face_sync_metadata_state' in call[0]]
         self.assertEqual(state_calls[-1][1][1], "description")
         self.assertEqual(state_calls[-1][1][2], '"Fasching"')
@@ -295,6 +299,11 @@ class SharedAlbumMetadataSyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"dateTimeOriginal" = $2', fallback_calls[0][0])
         self.assertIn('"timeZone" = $3', fallback_calls[0][0])
         self.assertEqual(fallback_calls[0][1], (TARGET_ASSET_1, new_date.isoformat(), "Europe/Vienna"))
+        asset_calls = [call for call in conn.execute_calls if 'UPDATE asset\n' in call[0]]
+        self.assertEqual(len(asset_calls), 1)
+        self.assertIn('"fileCreatedAt" = $2', asset_calls[0][0])
+        self.assertIn('"localDateTime" = $2', asset_calls[0][0])
+        self.assertEqual(asset_calls[0][1], (TARGET_ASSET_1, new_date.isoformat()))
         self.assertIn('latitude = $2', fallback_calls[1][0])
         self.assertIn('longitude = $3', fallback_calls[1][0])
         self.assertEqual(fallback_calls[1][1], (TARGET_ASSET_1, 48.0, 16.5))
