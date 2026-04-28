@@ -274,7 +274,7 @@ async def _apply_db_metadata_update(
     """Fallback for mirror rows the Immich API key cannot update."""
     await conn.execute("SET LOCAL immich_shared_sidecar.suppress_events = 'on'")
     if field_group == "taken_at":
-        taken_at = value.get("dateTimeOriginal")
+        taken_at = _datetime_db_value(value.get("dateTimeOriginal"))
         await conn.execute(
             """
             UPDATE asset_exif
@@ -368,6 +368,12 @@ def _datetime_value(value: Any) -> str | None:
     if isinstance(value, datetime):
         return value.isoformat()
     return str(value)
+
+
+def _datetime_db_value(value: Any) -> datetime | None:
+    if value is None or isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
 
 
 def _number_or_none(value: Any) -> float | None:
