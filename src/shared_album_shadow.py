@@ -22,6 +22,21 @@ def shadow_library_import_path(import_path_prefix: str, target_user_id: UUID | s
     return posixpath.join(prefix, str(target_user_id))
 
 
+def shadow_import_path_relative(import_path_prefix: str, original_path: str) -> Path:
+    """Return the shadow-root relative path for an Immich import path.
+
+    The returned path is relative to ``filesystem_root``. Paths must be strictly
+    below the configured import prefix; suspicious paths fail closed by raising
+    ``ValueError``.
+    """
+    prefix = posixpath.normpath(import_path_prefix)
+    normalized = posixpath.normpath(str(original_path))
+    if normalized == prefix or not normalized.startswith(f"{prefix}/"):
+        raise ValueError(f"path is outside shadow import prefix: {original_path}")
+    relative = normalized[len(prefix) + 1:]
+    return _safe_relative_path(Path(*PurePosixPath(relative).parts))
+
+
 def shadow_asset_relative_path(
     *,
     target_user_id: UUID | str,

@@ -17,6 +17,7 @@ from src.immich_api import ImmichAPI
 from src.ml_sync import sync_faces_for_asset, sync_faces_incremental
 from src.person_sync import sync_person_names, sync_person_thumbnails, sync_person_visibility
 from src.schema import validate_schema
+from src.shared_album_cleanup import cleanup_orphaned_shared_album_assets
 from src.shared_album_discovery import SharedAlbumEdge, discover_shared_album_edges
 from src.shared_album_shadow import (
     create_shadow_symlink,
@@ -51,6 +52,7 @@ def _empty_shared_album_stats() -> dict[str, int]:
         "shared_album_edges": 0,
         "album_justifications_marked": 0,
         "album_justifications_removed": 0,
+        "shared_album_assets_cleaned": 0,
     }
 
 
@@ -87,6 +89,10 @@ async def run_shared_albums_sync(api: ImmichAPI | None = None) -> dict[str, int]
             stats["album_justifications_removed"] = await remove_stale_album_justifications(
                 conn,
                 cycle_started_at,
+            )
+            stats["shared_album_assets_cleaned"] = await cleanup_orphaned_shared_album_assets(
+                conn,
+                config.shadow_library,
             )
 
         async with transaction() as conn:
