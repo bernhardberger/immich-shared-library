@@ -61,6 +61,18 @@ REQUIRED_SCHEMA: dict[str, set[str]] = {
     },
 }
 
+SHARED_ALBUMS_REQUIRED_SCHEMA: dict[str, set[str]] = {
+    "album_user": {
+        "albumId", "userId", "role",
+    },
+    "shared_link": {
+        "albumId", "type",
+    },
+    "shared_link_asset": {
+        "sharedLinkId", "assetId",
+    },
+}
+
 
 class SchemaValidationError(RuntimeError):
     """Raised when the Immich database schema doesn't match expectations."""
@@ -129,7 +141,21 @@ EXPECTED_UNIQUE_CONSTRAINTS: dict[str, list[frozenset[str]]] = {
 }
 
 
-async def validate_schema(conn: asyncpg.Connection | None = None) -> None:
+def required_schema_for_sync_mode(sync_mode: str) -> dict[str, set[str]]:
+    """Return Immich schema requirements for the configured sync mode."""
+    from src.config import SYNC_MODE_SHARED_ALBUMS
+
+    required = {table: set(columns) for table, columns in REQUIRED_SCHEMA.items()}
+    if sync_mode == SYNC_MODE_SHARED_ALBUMS:
+        for table, columns in SHARED_ALBUMS_REQUIRED_SCHEMA.items():
+            required.setdefault(table, set()).update(columns)
+    return required
+
+
+async def validate_schema(
+    conn: asyncpg.Connection | None = None,
+    sync_mode: str | None = None,
+) -> None:
     """Validate that all required Immich tables and columns exist.
 
     Queries information_schema.columns and compares against REQUIRED_SCHEMA.
@@ -137,7 +163,13 @@ async def validate_schema(conn: asyncpg.Connection | None = None) -> None:
     sidecar INSERTs into — these would cause hard failures at runtime.
     Raises SchemaValidationError listing every problem found.
     """
-    expected_tables = list(REQUIRED_SCHEMA.keys())
+    if sync_mode is None:
+        from src.config import settings
+
+        sync_mode = settings.sync_config.sync_mode
+
+    required_schema = required_schema_for_sync_mode(sync_mode)
+    expected_tables = list(required_schema.keys())
     insert_tables = list(INSERTED_COLUMNS.keys())
 
     async def _check(c: asyncpg.Connection) -> None:
@@ -159,7 +191,7 @@ async def validate_schema(conn: asyncpg.Connection | None = None) -> None:
         missing_tables: list[str] = []
         missing_columns: dict[str, list[str]] = {}
 
-        for table, expected_cols in REQUIRED_SCHEMA.items():
+        for table, expected_cols in required_schema.items():
             if table not in actual:
                 missing_tables.append(table)
                 continue
@@ -260,8 +292,8 @@ async def validate_schema(conn: asyncpg.Connection | None = None) -> None:
             raise SchemaValidationError(msg)
 
         logger.info("Schema validation passed (%d tables, %d columns checked)",
-                     len(REQUIRED_SCHEMA),
-                     sum(len(cols) for cols in REQUIRED_SCHEMA.values()))
+                     len(required_schema),
+                     sum(len(cols) for cols in required_schema.values()))
 
     if conn is not None:
         await _check(conn)
