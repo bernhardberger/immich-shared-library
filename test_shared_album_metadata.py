@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 import unittest
 from uuid import UUID
 
+import httpx
+
 METADATA_IMPORT_ERROR = None
 
 try:
@@ -68,15 +70,25 @@ class FakeConnection:
 
 
 class FakeAPI:
-    def __init__(self):
+    def __init__(self, denied_asset_ids=None, denial_message="Not found or no asset.update access"):
         self.updates = []
         self.bulk_updates = []
+        self.denied_asset_ids = set(denied_asset_ids or [])
+        self.denial_message = denial_message
 
     async def update_asset_metadata(self, asset_id, **kwargs):
         self.updates.append((asset_id, kwargs))
         return None
 
     async def update_assets_metadata(self, asset_ids, **kwargs):
+        if any(asset_id in self.denied_asset_ids for asset_id in asset_ids):
+            request = httpx.Request("PUT", "http://immich.test/api/assets")
+            response = httpx.Response(
+                400,
+                request=request,
+                json={"message": self.denial_message, "error": "Bad Request", "statusCode": 400},
+            )
+            raise httpx.HTTPStatusError("asset update denied", request=request, response=response)
         self.bulk_updates.append((list(asset_ids), kwargs))
         return None
 
@@ -216,6 +228,79 @@ class SharedAlbumMetadataSyncTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(api.updates, [])
         self.assertEqual(stats["metadata_conflicts"], 1)
+
+    async def test_description_update_falls_back_to_db_when_api_denies_asset_update_access(self) -> None:
+        conn = FakeConnection([
+            row(SOURCE_ASSET, description="Fasching"),
+            row(TARGET_ASSET_1),
+        ])
+        api = FakeAPI(denied_asset_ids={TARGET_ASSET_1})
+
+        stats = await reconcile_shared_album_metadata(conn, api)
+
+        self.assertEqual(api.bulk_updates, [])
+        self.assertEqual(stats["metadata_fields_propagated"], 1)
+        self.assertEqual(stats["metadata_assets_updated"], 1)
+        fallback_calls = [call for call in conn.execute_calls if 'UPDATE asset_exif' in call[0]]
+        self.assertEqual(len(fallback_calls), 1)
+        self.assertIn('description = $2', fallback_calls[0][0])
+        self.assertEqual(fallback_calls[0][1], (TARGET_ASSET_1, "Fasching"))
+        state_calls = [call for call in conn.execute_calls if 'INSERT INTO _face_sync_metadata_state' in call[0]]
+        self.assertEqual(state_calls[-1][1][1], "description")
+        self.assertEqual(state_calls[-1][1][2], '"Fasching"')
+
+    async def test_successful_api_update_does_not_use_db_fallback(self) -> None:
+        conn = FakeConnection([
+            row(SOURCE_ASSET, description="Ostern"),
+            row(TARGET_ASSET_1),
+        ])
+        api = FakeAPI()
+
+        stats = await reconcile_shared_album_metadata(conn, api)
+
+        self.assertEqual(api.bulk_updates, [([TARGET_ASSET_1], {"description": "Ostern"})])
+        self.assertEqual(stats["metadata_fields_propagated"], 1)
+        self.assertEqual([call for call in conn.execute_calls if 'UPDATE asset_exif' in call[0]], [])
+
+    async def test_non_access_api_failure_does_not_use_db_fallback(self) -> None:
+        conn = FakeConnection([
+            row(SOURCE_ASSET, description="Ostern"),
+            row(TARGET_ASSET_1),
+        ])
+        api = FakeAPI(denied_asset_ids={TARGET_ASSET_1}, denial_message="description must be a string")
+
+        with self.assertRaises(httpx.HTTPStatusError):
+            await reconcile_shared_album_metadata(conn, api)
+
+        self.assertEqual([call for call in conn.execute_calls if 'UPDATE asset_exif' in call[0]], [])
+
+    async def test_db_fallback_updates_taken_at_and_location_asset_exif_columns(self) -> None:
+        old_date = datetime(2025, 4, 20, 10, 0, tzinfo=timezone.utc)
+        new_date = datetime(2025, 4, 21, 10, 0, tzinfo=timezone.utc)
+        state = {
+            (SOURCE_ASSET, "taken_at"): {"dateTimeOriginal": old_date.isoformat(), "timeZone": "Europe/Vienna"},
+            (SOURCE_ASSET, "location"): {"latitude": 47.927, "longitude": 16.216},
+        }
+        conn = FakeConnection([
+            row(SOURCE_ASSET, taken_at=new_date, time_zone="Europe/Vienna", latitude=48.0, longitude=16.5),
+            row(TARGET_ASSET_1, taken_at=old_date, time_zone="Europe/Vienna", latitude=47.927, longitude=16.216),
+        ], state=state)
+        api = FakeAPI(denied_asset_ids={TARGET_ASSET_1})
+
+        stats = await reconcile_shared_album_metadata(conn, api)
+
+        self.assertEqual(stats["metadata_fields_propagated"], 2)
+        fallback_calls = [call for call in conn.execute_calls if 'UPDATE asset_exif' in call[0]]
+        self.assertEqual(len(fallback_calls), 2)
+        self.assertIn('"dateTimeOriginal" = $2', fallback_calls[0][0])
+        self.assertIn('"timeZone" = $3', fallback_calls[0][0])
+        self.assertEqual(fallback_calls[0][1], (TARGET_ASSET_1, new_date.isoformat(), "Europe/Vienna"))
+        self.assertIn('latitude = $2', fallback_calls[1][0])
+        self.assertIn('longitude = $3', fallback_calls[1][0])
+        self.assertEqual(fallback_calls[1][1], (TARGET_ASSET_1, 48.0, 16.5))
+        recorded_groups = [call[1][1] for call in conn.execute_calls if 'INSERT INTO _face_sync_metadata_state' in call[0]]
+        self.assertIn("taken_at", recorded_groups)
+        self.assertIn("location", recorded_groups)
 
     async def test_path_prefix_only_asset_map_rows_are_ignored_by_query_scope(self) -> None:
         conn = FakeConnection([row(SOURCE_ASSET), row(TARGET_ASSET_1)])

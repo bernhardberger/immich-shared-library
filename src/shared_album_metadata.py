@@ -10,6 +10,7 @@ from typing import Any, Mapping
 from uuid import UUID
 
 import asyncpg
+import httpx
 
 from src.immich_api import ImmichAPI
 
@@ -69,7 +70,7 @@ async def reconcile_shared_album_metadata(conn: asyncpg.Connection, api: ImmichA
                 if _value_key(current_value) == _value_key(desired_value):
                     continue
                 asset_id = UUID(str(row["asset_id"]))
-                applied = await _apply_api_update(api, asset_id, field_group, desired_value)
+                applied = await _apply_api_update(conn, api, asset_id, field_group, desired_value)
                 if not applied:
                     blocked = True
                     await record_metadata_state(
@@ -217,28 +218,106 @@ def _field_value(row: Mapping[str, Any], field_group: str) -> Any:
     raise ValueError(f"unknown metadata field group: {field_group}")
 
 
-async def _apply_api_update(api: ImmichAPI, asset_id: UUID, field_group: str, value: Any) -> bool:
+async def _apply_api_update(
+    conn: asyncpg.Connection,
+    api: ImmichAPI,
+    asset_id: UUID,
+    field_group: str,
+    value: Any,
+) -> bool:
     """Apply a reconciled value using only Immich API shapes accepted by v2.7.5."""
-    if field_group == "taken_at":
-        if value.get("dateTimeOriginal") is None:
-            return False
-        # Immich v2.7.5's bulk endpoint persisted metadata reliably in live
-        # testing. timeZone cannot be sent alongside dateTimeOriginal.
-        await api.update_assets_metadata([asset_id], dateTimeOriginal=value.get("dateTimeOriginal"))
-        if value.get("timeZone") is not None:
-            await api.update_assets_metadata([asset_id], timeZone=value.get("timeZone"))
-        return True
-    if field_group == "location":
-        # The public DTO validates latitude/longitude as non-empty when either
-        # GPS field is present, so location clears are surfaced as conflicts.
-        if value.get("latitude") is None or value.get("longitude") is None:
-            return False
-        await api.update_assets_metadata([asset_id], latitude=value.get("latitude"), longitude=value.get("longitude"))
-        return True
-    if field_group == "description":
-        await api.update_assets_metadata([asset_id], description="" if value is None else value)
+    try:
+        if field_group == "taken_at":
+            if value.get("dateTimeOriginal") is None:
+                return False
+            # Immich v2.7.5's bulk endpoint persisted metadata reliably in live
+            # testing. timeZone cannot be sent alongside dateTimeOriginal.
+            await api.update_assets_metadata([asset_id], dateTimeOriginal=value.get("dateTimeOriginal"))
+            if value.get("timeZone") is not None:
+                await api.update_assets_metadata([asset_id], timeZone=value.get("timeZone"))
+            return True
+        if field_group == "location":
+            # The public DTO validates latitude/longitude as non-empty when either
+            # GPS field is present, so location clears are surfaced as conflicts.
+            if value.get("latitude") is None or value.get("longitude") is None:
+                return False
+            await api.update_assets_metadata([asset_id], latitude=value.get("latitude"), longitude=value.get("longitude"))
+            return True
+        if field_group == "description":
+            await api.update_assets_metadata([asset_id], description="" if value is None else value)
+            return True
+    except httpx.HTTPStatusError as exc:
+        if not _is_asset_update_access_denied(exc):
+            raise
+        await _apply_db_metadata_update(conn, asset_id, field_group, value)
         return True
     raise ValueError(f"unknown metadata field group: {field_group}")
+
+
+async def _apply_db_metadata_update(
+    conn: asyncpg.Connection,
+    asset_id: UUID,
+    field_group: str,
+    value: Any,
+) -> None:
+    """Fallback for mirror rows the Immich API key cannot update."""
+    if field_group == "taken_at":
+        await conn.execute(
+            """
+            UPDATE asset_exif
+            SET "dateTimeOriginal" = $2,
+                "timeZone" = $3,
+                "updatedAt" = NOW()
+            WHERE "assetId" = $1
+            """,
+            asset_id,
+            value.get("dateTimeOriginal"),
+            value.get("timeZone"),
+        )
+        return
+    if field_group == "location":
+        await conn.execute(
+            """
+            UPDATE asset_exif
+            SET latitude = $2,
+                longitude = $3,
+                "updatedAt" = NOW()
+            WHERE "assetId" = $1
+            """,
+            asset_id,
+            value.get("latitude"),
+            value.get("longitude"),
+        )
+        return
+    if field_group == "description":
+        await conn.execute(
+            """
+            UPDATE asset_exif
+            SET description = $2,
+                "updatedAt" = NOW()
+            WHERE "assetId" = $1
+            """,
+            asset_id,
+            value,
+        )
+        return
+    raise ValueError(f"unknown metadata field group: {field_group}")
+
+
+def _is_asset_update_access_denied(exc: httpx.HTTPStatusError) -> bool:
+    response = exc.response
+    if response.status_code != 400:
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        body = response.text
+    if isinstance(body, Mapping):
+        message = body.get("message")
+        if isinstance(message, list):
+            return any("Not found or no asset.update access" in str(item) for item in message)
+        return "Not found or no asset.update access" in str(message)
+    return "Not found or no asset.update access" in str(body)
 
 
 def _is_empty_value(value: Any) -> bool:
