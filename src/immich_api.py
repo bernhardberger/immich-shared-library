@@ -1,4 +1,6 @@
 import logging
+from typing import Any, Iterable
+from uuid import UUID
 
 import httpx
 
@@ -8,11 +10,16 @@ logger = logging.getLogger(__name__)
 
 
 class ImmichAPI:
-    def __init__(self) -> None:
-        self._base_url = settings.immich_api_url.rstrip("/")
-        self._client = httpx.AsyncClient(
+    def __init__(
+        self,
+        client: httpx.AsyncClient | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ) -> None:
+        self._base_url = (base_url or settings.immich_api_url).rstrip("/")
+        self._client = client or httpx.AsyncClient(
             headers={
-                "x-api-key": settings.immich_api_key.get_secret_value(),
+                "x-api-key": api_key if api_key is not None else settings.immich_api_key.get_secret_value(),
                 "Accept": "application/json",
             },
             timeout=30,
@@ -28,3 +35,57 @@ class ImmichAPI:
             return resp.status_code == 200
         except httpx.HTTPError:
             return False
+
+    async def list_libraries(self) -> list[dict[str, Any]]:
+        resp = await self._client.get(f"{self._base_url}/api/libraries")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def create_library(
+        self,
+        *,
+        owner_id: UUID | str,
+        name: str,
+        import_paths: Iterable[str],
+        exclusion_patterns: Iterable[str] = (),
+    ) -> dict[str, Any]:
+        resp = await self._client.post(
+            f"{self._base_url}/api/libraries",
+            json={
+                "ownerId": str(owner_id),
+                "name": name,
+                "importPaths": list(import_paths),
+                "exclusionPatterns": list(exclusion_patterns),
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def update_library(
+        self,
+        *,
+        library_id: UUID | str,
+        name: str,
+        import_paths: Iterable[str],
+        exclusion_patterns: Iterable[str] = (),
+    ) -> dict[str, Any]:
+        resp = await self._client.put(
+            f"{self._base_url}/api/libraries/{library_id}",
+            json={
+                "name": name,
+                "importPaths": list(import_paths),
+                "exclusionPatterns": list(exclusion_patterns),
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def validate_library(self, library_id: UUID | str) -> Any:
+        resp = await self._client.post(f"{self._base_url}/api/libraries/{library_id}/validate")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def scan_library(self, library_id: UUID | str) -> Any:
+        resp = await self._client.post(f"{self._base_url}/api/libraries/{library_id}/scan")
+        resp.raise_for_status()
+        return resp.json()

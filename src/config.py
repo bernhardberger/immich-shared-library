@@ -1,5 +1,6 @@
 import logging
 import os
+import posixpath
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
@@ -38,9 +39,21 @@ class SharedAlbumsAlbumConfig:
 
 
 @dataclass(frozen=True)
+class SharedAlbumsShadowLibraryConfig:
+    name_prefix: str = "Immich Shared Library Mirrors"
+    filesystem_root: str = "/external_library/.immich-shared-library/shared-albums"
+    import_path_prefix: str = "/external_library/.immich-shared-library/shared-albums"
+    auto_create: bool = True
+    auto_scan: bool = False
+
+
+@dataclass(frozen=True)
 class SharedAlbumsConfig:
     scope: SharedAlbumsScopeConfig = field(default_factory=SharedAlbumsScopeConfig)
     albums: SharedAlbumsAlbumConfig = field(default_factory=SharedAlbumsAlbumConfig)
+    shadow_library: SharedAlbumsShadowLibraryConfig = field(
+        default_factory=SharedAlbumsShadowLibraryConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -197,7 +210,85 @@ def _parse_shared_albums_config(config_path: str, data: dict) -> SharedAlbumsCon
             include=albums_include,
             exclude_name_patterns=tuple(patterns_raw),
         ),
+        shadow_library=_parse_shadow_library_config(config_path, data.get("shadow_library", {})),
     )
+
+
+def _parse_shadow_library_config(
+    config_path: str,
+    shadow_data: object,
+) -> SharedAlbumsShadowLibraryConfig:
+    if shadow_data is None:
+        shadow_data = {}
+    if not isinstance(shadow_data, dict):
+        raise ValueError(f"{config_path}: 'shadow_library' must be a mapping")
+
+    defaults = SharedAlbumsShadowLibraryConfig()
+    name_prefix = str(shadow_data.get("name_prefix") or defaults.name_prefix).strip()
+    if not name_prefix:
+        raise ValueError(f"{config_path}: shadow_library.name_prefix must not be empty")
+
+    filesystem_root = _validate_absolute_config_path(
+        config_path,
+        "shadow_library.filesystem_root",
+        shadow_data.get("filesystem_root") or defaults.filesystem_root,
+        allow_root=False,
+    )
+    import_path_prefix = _validate_absolute_config_path(
+        config_path,
+        "shadow_library.import_path_prefix",
+        shadow_data.get("import_path_prefix") or defaults.import_path_prefix,
+        allow_root=False,
+    )
+
+    return SharedAlbumsShadowLibraryConfig(
+        name_prefix=name_prefix,
+        filesystem_root=filesystem_root,
+        import_path_prefix=import_path_prefix,
+        auto_create=_get_bool_config_value(
+            config_path,
+            shadow_data,
+            "shadow_library.auto_create",
+            "auto_create",
+            defaults.auto_create,
+        ),
+        auto_scan=_get_bool_config_value(
+            config_path,
+            shadow_data,
+            "shadow_library.auto_scan",
+            "auto_scan",
+            defaults.auto_scan,
+        ),
+    )
+
+
+def _validate_absolute_config_path(
+    config_path: str,
+    field_name: str,
+    value: object,
+    *,
+    allow_root: bool,
+) -> str:
+    path = str(value or "").strip()
+    if not path.startswith("/"):
+        raise ValueError(f"{config_path}: {field_name} must be an absolute path")
+    normalized = posixpath.normpath(path)
+    if normalized == "/" and not allow_root:
+        raise ValueError(f"{config_path}: {field_name} must not be /")
+    return normalized
+
+
+def _get_bool_config_value(
+    config_path: str,
+    data: dict,
+    field_name: str,
+    key: str,
+    default: bool,
+) -> bool:
+    value = data.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"{config_path}: {field_name} must be a boolean")
+    return value
 
 
 class Settings(BaseSettings):

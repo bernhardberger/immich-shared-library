@@ -117,9 +117,90 @@ albums:
             self.assertEqual(shared_albums.scope.exclude_users, (UUID(EXCLUDED_USER_ID),))
             self.assertEqual(shared_albums.albums.include, "all_shared_albums")
             self.assertEqual(shared_albums.albums.exclude_name_patterns, ("Private*",))
+            self.assertEqual(
+                shared_albums.shadow_library.name_prefix,
+                "Immich Shared Library Mirrors",
+            )
+            self.assertEqual(
+                shared_albums.shadow_library.filesystem_root,
+                "/external_library/.immich-shared-library/shared-albums",
+            )
+            self.assertEqual(
+                shared_albums.shadow_library.import_path_prefix,
+                "/external_library/.immich-shared-library/shared-albums",
+            )
+            self.assertTrue(shared_albums.shadow_library.auto_create)
+            self.assertFalse(shared_albums.shadow_library.auto_scan)
 
             with self.assertRaisesRegex(ValueError, "does not define sync_jobs"):
                 load_sync_jobs(str(path))
+
+    def test_shared_albums_yaml_parses_explicit_shadow_library(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = self.write_config(
+                temp_dir,
+                """
+sync_mode: shared_albums
+shadow_library:
+  name_prefix: "Household Mirrors"
+  filesystem_root: "/external_library/mirrors"
+  import_path_prefix: "/external_library/mirrors"
+  auto_create: false
+  auto_scan: true
+""",
+            )
+
+            config = load_config(str(path))
+
+            assert config.shared_albums is not None
+            shadow_library = config.shared_albums.shadow_library
+            self.assertEqual(shadow_library.name_prefix, "Household Mirrors")
+            self.assertEqual(shadow_library.filesystem_root, "/external_library/mirrors")
+            self.assertEqual(shadow_library.import_path_prefix, "/external_library/mirrors")
+            self.assertFalse(shadow_library.auto_create)
+            self.assertTrue(shadow_library.auto_scan)
+
+    def test_shared_albums_rejects_relative_shadow_library_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = self.write_config(
+                temp_dir,
+                """
+sync_mode: shared_albums
+shadow_library:
+  filesystem_root: "relative/path"
+""",
+            )
+
+            with self.assertRaisesRegex(ValueError, "shadow_library.filesystem_root must be an absolute path"):
+                load_config(str(path))
+
+    def test_shared_albums_rejects_root_shadow_library_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = self.write_config(
+                temp_dir,
+                """
+sync_mode: shared_albums
+shadow_library:
+  filesystem_root: "/"
+""",
+            )
+
+            with self.assertRaisesRegex(ValueError, "shadow_library.filesystem_root must not be /"):
+                load_config(str(path))
+
+    def test_shared_albums_rejects_non_boolean_shadow_library_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = self.write_config(
+                temp_dir,
+                """
+sync_mode: shared_albums
+shadow_library:
+  auto_create: "false"
+""",
+            )
+
+            with self.assertRaisesRegex(ValueError, "shadow_library.auto_create must be a boolean"):
+                load_config(str(path))
 
     def test_shared_albums_and_sync_jobs_are_mutually_exclusive(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

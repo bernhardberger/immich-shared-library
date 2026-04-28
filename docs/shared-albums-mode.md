@@ -29,6 +29,13 @@ scope:
 albums:
   include: all_shared_albums
   exclude_name_patterns: []
+
+shadow_library:
+  name_prefix: "Immich Shared Library Mirrors"
+  filesystem_root: "/external_library/.immich-shared-library/shared-albums"
+  import_path_prefix: "/external_library/.immich-shared-library/shared-albums"
+  auto_create: true
+  auto_scan: false
 ```
 
 Compatibility rules:
@@ -39,8 +46,35 @@ Compatibility rules:
 - `scope.mode: all_local_users` means every non-deleted local Immich user can be a source or target unless excluded.
 - `albums.include: all_shared_albums` means every eligible album shared with at least one other authenticated local participant is considered.
 - `albums.exclude_name_patterns` are optional case-insensitive patterns for operator-side safety excludes.
+- `shadow_library` controls sidecar-owned external-library mirrors. v1 creates one shadow external library per target user, not one per album.
+- `shadow_library.filesystem_root` is where the sidecar may create directories and symlinks. It must be an absolute path and must not be `/`.
+- `shadow_library.import_path_prefix` is the Immich-visible import-path prefix. Each target user's library imports `{import_path_prefix}/{target_user_id}`.
+- `shadow_library.auto_create` allows the sidecar to create/update the per-target Immich external libraries. `auto_scan` remains disabled by default so operators can choose when scan jobs start.
 
-Open config item for implementation: the current sync engine needs a target external library and target path prefix per target/source pair. Shared-albums mode should avoid per-album config, but it still needs a deterministic shadow-library/path strategy. Prefer auto-derived per-target libraries/paths if Immich's API/schema allows safe creation; otherwise add one global `shadow_library` section rather than per-album or per-user lists.
+Shadow-library paths are deterministic. For target user `T`, source user `S`, source asset `A`, and file name `IMG_0001.JPG`, the sidecar-owned symlink path is:
+
+```text
+{filesystem_root}/{T}/{S}/{A}/IMG_0001.JPG
+```
+
+The matching Immich import path for the target user's shadow library is:
+
+```text
+{import_path_prefix}/{T}
+```
+
+The deterministic library name is `{name_prefix} - {target_user_id}`. This avoids per-album or per-user config while keeping cleanup ownership scoped to a sidecar-owned root.
+
+## Immich library API contract
+
+Immich v2.7.5 supports admin-managed external libraries for specific users:
+
+- Create: `POST /api/libraries` with `{ "ownerId": "user-uuid", "name": "Library name", "importPaths": ["/path"], "exclusionPatterns": [] }`.
+- Update: `PUT /api/libraries/{id}` with full-array replacement `{ "name": "...", "importPaths": [...], "exclusionPatterns": [...] }`.
+- Validate: `POST /api/libraries/{id}/validate`.
+- Scan: `POST /api/libraries/{id}/scan`.
+
+The sidecar uses this contract only through thin API helpers in Phase 4a. Runtime sync integration is intentionally deferred.
 
 ## Existing architecture to preserve
 
@@ -100,7 +134,7 @@ Shared-albums mode should add a discovered-job layer before the existing sync ph
    - Produce candidate mirror edges: `(source_album_id, source_asset_id, source_user_id, target_user_id)`.
 
 2. **Resolve target location**
-   - Find or create the target user's shadow external library/path for the source user's assets.
+   - Find or create the target user's sidecar-managed shadow external library/path.
    - Build an internal `SyncJob`-like object for each source/target/path combination, not for each album.
    - Reuse path remapping when a shadow path exists; otherwise fail closed with a clear validation error.
 
@@ -130,6 +164,8 @@ Shared-albums mode should add a discovered-job layer before the existing sync ph
 - Exclude public-link/anonymous shares by default.
 - Scope to non-deleted local users; excluded users are neither sources nor targets.
 - Do not delete source originals or source album rows.
+- Do not write into originals or camera uploads. Shared-albums mode may only create/remove directories and symlinks below `shadow_library.filesystem_root`.
+- Validate normalized/resolved shadow paths before writing so `..` components or intermediate symlinks cannot escape the configured root.
 - Delete only target assets that are tracked by this sidecar and have no remaining tracked justification.
 - Preserve current duplicate detection against a target user's own uploads where applicable.
 - Preserve the warning that forced Immich ML jobs may overwrite mirrored ML rows temporarily.
@@ -193,7 +229,14 @@ Manual integration checks should continue to use `./run-utility.sh test_sync.py`
 - Reuse existing target assets when multiple albums justify the same source/target pair.
 - Keep path-prefix tracking independent.
 
-### Phase 4: Sync integration
+### Phase 4a: Shadow library groundwork
+
+- Add `shadow_library` config with safe defaults and validation.
+- Add thin Immich library API helpers for list/create/update/validate/scan.
+- Add safe shadow path/symlink helpers for deterministic per-target-user mirror roots.
+- Do not call the new API helpers or symlink manager from the runtime sync loop yet.
+
+### Phase 4b: Sync integration
 
 - Convert candidate edges into internal sync operations that reuse `sync_asset`, face sync, and person sync.
 - Add backfill for new participants and new albums.
@@ -214,7 +257,7 @@ Manual integration checks should continue to use `./run-utility.sh test_sync.py`
 ## Open questions
 
 - What is the exact Immich v2.7.x schema for authenticated album participants and public-link associations? This must be confirmed before code.
-- Can the sidecar safely create/manage per-user shadow external libraries via Immich's API, or must operators create one global shadow library structure manually?
+- How should runtime integration reconcile an existing manually created library whose name matches the deterministic shadow-library name but whose import paths differ?
 - Should v1 create participant-owned target albums mirroring source album names, or is library/timeline/search visibility sufficient for the first upstreamable version?
 - How should duplicate detection behave when an album contains an asset the target already has as their own upload and also in multiple shared albums?
 - Should target local person renames be overwritten immediately, or only when the source owner's metadata changes?
