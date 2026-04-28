@@ -56,7 +56,7 @@ async def mark_album_justification(
         DO UPDATE SET
             source_user_id = EXCLUDED.source_user_id,
             target_asset_id = EXCLUDED.target_asset_id,
-            target_album_id = EXCLUDED.target_album_id,
+            target_album_id = COALESCE(EXCLUDED.target_album_id, _face_sync_album_map.target_album_id),
             last_seen_at = EXCLUDED.last_seen_at
         """,
         edge.album_id,

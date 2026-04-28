@@ -64,6 +64,10 @@ class SharedAlbumTrackingTest(unittest.IsolatedAsyncioTestCase):
         sql, args = conn.execute_calls[0]
         self.assertIn("INSERT INTO _face_sync_album_map", sql)
         self.assertIn("ON CONFLICT (source_album_id, source_asset_id, target_user_id)", sql)
+        self.assertIn(
+            "target_album_id = COALESCE(EXCLUDED.target_album_id, _face_sync_album_map.target_album_id)",
+            sql,
+        )
         self.assertIn("last_seen_at = EXCLUDED.last_seen_at", sql)
         self.assertEqual(
             args,
