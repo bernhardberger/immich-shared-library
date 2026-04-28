@@ -31,6 +31,15 @@ class SchemaModeRequirementsTest(unittest.TestCase):
         self.assertEqual(required_schema["shared_link"], {"albumId", "type"})
         self.assertEqual(required_schema["shared_link_asset"], {"sharedLinkId", "assetId"})
 
+    def test_asset_exif_requirements_include_first_shared_metadata_slice(self) -> None:
+        required_schema = required_schema_for_sync_mode(SYNC_MODE_SHARED_ALBUMS)
+
+        self.assertTrue(
+            {"dateTimeOriginal", "timeZone", "latitude", "longitude", "description"}.issubset(
+                required_schema["asset_exif"]
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

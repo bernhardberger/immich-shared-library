@@ -90,6 +90,24 @@ class ImmichAPI:
         resp.raise_for_status()
         return _json_or_none(resp)
 
+    async def update_asset_metadata(self, asset_id: UUID | str, **metadata: Any) -> Any:
+        """Update Immich-owned asset metadata through the public asset API."""
+        resp = await self._client.put(
+            f"{self._base_url}/api/assets/{asset_id}",
+            json=metadata,
+        )
+        resp.raise_for_status()
+        return _json_or_none(resp)
+
+    async def update_assets_metadata(self, asset_ids: Iterable[UUID | str], **metadata: Any) -> Any:
+        """Bulk-update Immich-owned asset metadata through the public asset API."""
+        resp = await self._client.put(
+            f"{self._base_url}/api/assets",
+            json={"ids": [str(asset_id) for asset_id in asset_ids], **metadata},
+        )
+        resp.raise_for_status()
+        return _json_or_none(resp)
+
 
 def _json_or_none(resp: httpx.Response) -> Any | None:
     """Return JSON when present, or None for no-content/empty responses."""

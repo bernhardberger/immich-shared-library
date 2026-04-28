@@ -139,6 +139,32 @@ class ImmichLibraryAPITest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(await self.make_api(client).scan_library(LIBRARY_ID))
 
+    async def test_update_asset_metadata_uses_asset_update_endpoint(self) -> None:
+        client = FakeAsyncClient()
+
+        await self.make_api(client).update_asset_metadata(
+            LIBRARY_ID,
+            description="Fasching",
+            latitude=47.95,
+            longitude=16.233,
+        )
+
+        self.assertEqual(client.calls[0][0], "PUT")
+        self.assertEqual(client.calls[0][1], f"http://immich.example/api/assets/{LIBRARY_ID}")
+        self.assertEqual(
+            client.calls[0][2]["json"],
+            {"description": "Fasching", "latitude": 47.95, "longitude": 16.233},
+        )
+
+    async def test_update_assets_metadata_uses_bulk_asset_update_endpoint(self) -> None:
+        client = FakeAsyncClient()
+
+        await self.make_api(client).update_assets_metadata([LIBRARY_ID], timeZone="Europe/Vienna")
+
+        self.assertEqual(client.calls[0][0], "PUT")
+        self.assertEqual(client.calls[0][1], "http://immich.example/api/assets")
+        self.assertEqual(client.calls[0][2]["json"], {"ids": [str(LIBRARY_ID)], "timeZone": "Europe/Vienna"})
+
 
 if __name__ == "__main__":
     unittest.main()

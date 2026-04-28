@@ -14,7 +14,7 @@ from src.sync_engine import run_full_sync
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 3  # Bump when tracking table schema changes
+SCHEMA_VERSION = 4  # Bump when tracking table schema changes
 
 
 async def ensure_tracking_tables() -> None:
@@ -58,6 +58,7 @@ async def ensure_tracking_tables() -> None:
         )
     """)
     await _ensure_album_map_table()
+    await _ensure_metadata_state_table()
 
     await _run_migrations()
     logger.info("Tracking tables ready (schema version %d)", SCHEMA_VERSION)
@@ -87,6 +88,20 @@ async def _ensure_album_map_table() -> None:
     """)
 
 
+async def _ensure_metadata_state_table() -> None:
+    """Create shared metadata reconciliation state for shared_albums mode."""
+    await execute("""
+        CREATE TABLE IF NOT EXISTS _face_sync_metadata_state (
+            source_asset_id UUID NOT NULL,
+            field_group TEXT NOT NULL,
+            synced_value JSONB NULL,
+            conflict_values JSONB NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (source_asset_id, field_group)
+        )
+    """)
+
+
 async def _run_migrations() -> None:
     """Run pending schema migrations based on stored version."""
     row = await fetch_one(
@@ -102,6 +117,9 @@ async def _run_migrations() -> None:
 
     if current < 3:
         await _migrate_v3()
+
+    if current < 4:
+        await _migrate_v4()
 
     await execute(
         """
@@ -163,6 +181,11 @@ async def _migrate_v2() -> None:
 async def _migrate_v3() -> None:
     """Add shared-album justification tracking table."""
     await _ensure_album_map_table()
+
+
+async def _migrate_v4() -> None:
+    """Add shared metadata reconciliation state table."""
+    await _ensure_metadata_state_table()
 
 
 async def validate_user_and_library_ids() -> None:

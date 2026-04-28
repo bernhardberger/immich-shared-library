@@ -19,6 +19,7 @@ from src.person_sync import sync_person_names, sync_person_thumbnails, sync_pers
 from src.schema import validate_schema
 from src.shared_album_cleanup import cleanup_orphaned_shared_album_assets
 from src.shared_album_discovery import SharedAlbumEdge, discover_shared_album_edges
+from src.shared_album_metadata import reconcile_shared_album_metadata
 from src.shared_album_shadow import (
     create_shadow_symlink,
     shadow_asset_relative_path,
@@ -59,6 +60,10 @@ def _empty_shared_album_stats() -> dict[str, int]:
         "mirror_album_assets_removed": 0,
         "mirror_album_mappings_updated": 0,
         "shared_album_assets_cleaned": 0,
+        "metadata_fields_initialized": 0,
+        "metadata_fields_propagated": 0,
+        "metadata_conflicts": 0,
+        "metadata_assets_updated": 0,
     }
 
 
@@ -103,6 +108,11 @@ async def run_shared_albums_sync(api: ImmichAPI | None = None) -> dict[str, int]
                 conn,
                 config.shadow_library,
             )
+
+        async with transaction() as conn:
+            metadata_stats = await reconcile_shared_album_metadata(conn, api)
+            for key, value in metadata_stats.items():
+                stats[key] += value
 
         async with transaction() as conn:
             stats["faces_synced"] += await sync_faces_incremental(conn)

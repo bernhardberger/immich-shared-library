@@ -23,7 +23,7 @@ REQUIRED_SCHEMA: dict[str, set[str]] = {
         "isEdited", "deletedAt",
     },
     "asset_exif": {
-        "assetId", "dateTimeOriginal",
+        "assetId", "dateTimeOriginal", "timeZone", "latitude", "longitude", "description",
     },
     "asset_file": {
         "id", "assetId", "type", "path", "isEdited", "isProgressive",
