@@ -14,7 +14,7 @@ from src.sync_engine import run_full_sync
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 2  # Bump when tracking table schema changes
+SCHEMA_VERSION = 3  # Bump when tracking table schema changes
 
 
 async def ensure_tracking_tables() -> None:
@@ -57,9 +57,34 @@ async def ensure_tracking_tables() -> None:
             PRIMARY KEY (source_asset_id, target_user_id)
         )
     """)
+    await _ensure_album_map_table()
 
     await _run_migrations()
     logger.info("Tracking tables ready (schema version %d)", SCHEMA_VERSION)
+
+
+async def _ensure_album_map_table() -> None:
+    """Create shared-album tracking primitives used by shared_albums mode."""
+    await execute("""
+        CREATE TABLE IF NOT EXISTS _face_sync_album_map (
+            source_album_id UUID NOT NULL,
+            source_asset_id UUID NOT NULL,
+            source_user_id UUID NOT NULL,
+            target_user_id UUID NOT NULL,
+            target_asset_id UUID NOT NULL,
+            target_album_id UUID NULL,
+            last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (source_album_id, source_asset_id, target_user_id)
+        )
+    """)
+    await execute("""
+        CREATE INDEX IF NOT EXISTS _face_sync_album_map_target_asset_idx
+            ON _face_sync_album_map (target_asset_id)
+    """)
+    await execute("""
+        CREATE INDEX IF NOT EXISTS _face_sync_album_map_last_seen_idx
+            ON _face_sync_album_map (target_user_id, last_seen_at)
+    """)
 
 
 async def _run_migrations() -> None:
@@ -74,6 +99,9 @@ async def _run_migrations() -> None:
 
     if current < 2:
         await _migrate_v2()
+
+    if current < 3:
+        await _migrate_v3()
 
     await execute(
         """
@@ -130,6 +158,11 @@ async def _migrate_v2() -> None:
             END IF;
         END $$
     """)
+
+
+async def _migrate_v3() -> None:
+    """Add shared-album justification tracking table."""
+    await _ensure_album_map_table()
 
 
 async def validate_user_and_library_ids() -> None:
