@@ -10,6 +10,9 @@ from pydantic_settings import BaseSettings
 
 logger = logging.getLogger(__name__)
 
+SYNC_MODE_PATH_PREFIX = "path_prefix"
+SYNC_MODE_SHARED_ALBUMS = "shared_albums"
+
 
 @dataclass(frozen=True)
 class SyncJob:
@@ -22,15 +25,81 @@ class SyncJob:
     album_id: UUID | None = field(default=None)
 
 
-def load_sync_jobs(config_path: str) -> list[SyncJob]:
-    """Load sync jobs from a YAML config file.
+@dataclass(frozen=True)
+class SharedAlbumsScopeConfig:
+    mode: str = "all_local_users"
+    exclude_users: tuple[UUID, ...] = ()
 
-    Validates required fields, UUID format, and unique job names.
-    Raises ValueError on invalid config.
+
+@dataclass(frozen=True)
+class SharedAlbumsAlbumConfig:
+    include: str = "all_shared_albums"
+    exclude_name_patterns: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SharedAlbumsConfig:
+    scope: SharedAlbumsScopeConfig = field(default_factory=SharedAlbumsScopeConfig)
+    albums: SharedAlbumsAlbumConfig = field(default_factory=SharedAlbumsAlbumConfig)
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    sync_mode: str
+    sync_jobs: list[SyncJob] = field(default_factory=list)
+    shared_albums: SharedAlbumsConfig | None = None
+
+
+def load_config(config_path: str) -> AppConfig:
+    """Load the sidecar config file.
+
+    Existing configs with only sync_jobs are treated as path-prefix mode.
+    shared_albums mode is parsed here but its runtime discovery is added later.
     """
     import yaml
     path = Path(config_path)
     data = yaml.safe_load(path.read_text())
+
+    if not isinstance(data, dict):
+        raise ValueError(f"{config_path}: must contain a mapping")
+
+    sync_mode = str(data.get("sync_mode") or SYNC_MODE_PATH_PREFIX)
+    if sync_mode not in {SYNC_MODE_PATH_PREFIX, SYNC_MODE_SHARED_ALBUMS}:
+        raise ValueError(
+            f"{config_path}: sync_mode must be one of: "
+            f"{SYNC_MODE_PATH_PREFIX}, {SYNC_MODE_SHARED_ALBUMS}"
+        )
+
+    has_sync_jobs = "sync_jobs" in data
+    if sync_mode == SYNC_MODE_SHARED_ALBUMS:
+        if has_sync_jobs:
+            raise ValueError(
+                f"{config_path}: sync_mode: {SYNC_MODE_SHARED_ALBUMS} and "
+                "sync_jobs are mutually exclusive"
+            )
+        return AppConfig(
+            sync_mode=SYNC_MODE_SHARED_ALBUMS,
+            shared_albums=_parse_shared_albums_config(config_path, data),
+        )
+
+    return AppConfig(
+        sync_mode=SYNC_MODE_PATH_PREFIX,
+        sync_jobs=_parse_sync_jobs(config_path, data),
+    )
+
+def load_sync_jobs(config_path: str) -> list[SyncJob]:
+    """Load sync jobs from a YAML config file.
+    Validates required fields, UUID format, and unique job names.
+    Raises ValueError on invalid config.
+    """
+    config = load_config(config_path)
+    if config.sync_mode != SYNC_MODE_PATH_PREFIX:
+        raise ValueError(f"{config_path}: sync_mode '{config.sync_mode}' does not define sync_jobs")
+    return config.sync_jobs
+
+
+def _parse_sync_jobs(config_path: str, data: dict) -> list[SyncJob]:
+    """Parse path-prefix sync jobs from a loaded YAML mapping."""
 
     if not isinstance(data, dict) or "sync_jobs" not in data:
         raise ValueError(f"{config_path}: must contain a 'sync_jobs' key")
@@ -77,6 +146,58 @@ def load_sync_jobs(config_path: str) -> list[SyncJob]:
             raise ValueError(f"{config_path}: sync_jobs[{i}] ({name}): {e}") from e
 
     return jobs
+
+
+def _parse_shared_albums_config(config_path: str, data: dict) -> SharedAlbumsConfig:
+    """Parse shared-albums mode options from a loaded YAML mapping."""
+    scope_data = data.get("scope", {})
+    if scope_data is None:
+        scope_data = {}
+    if not isinstance(scope_data, dict):
+        raise ValueError(f"{config_path}: 'scope' must be a mapping")
+
+    scope_mode = str(scope_data.get("mode") or "all_local_users")
+    if scope_mode != "all_local_users":
+        raise ValueError(f"{config_path}: scope.mode must be 'all_local_users'")
+
+    exclude_users_raw = scope_data.get("exclude_users", [])
+    if exclude_users_raw is None:
+        exclude_users_raw = []
+    if not isinstance(exclude_users_raw, list):
+        raise ValueError(f"{config_path}: scope.exclude_users must be a list")
+    try:
+        exclude_users = tuple(UUID(str(user_id)) for user_id in exclude_users_raw)
+    except ValueError as e:
+        raise ValueError(f"{config_path}: scope.exclude_users contains invalid UUID: {e}") from e
+
+    albums_data = data.get("albums", {})
+    if albums_data is None:
+        albums_data = {}
+    if not isinstance(albums_data, dict):
+        raise ValueError(f"{config_path}: 'albums' must be a mapping")
+
+    albums_include = str(albums_data.get("include") or "all_shared_albums")
+    if albums_include != "all_shared_albums":
+        raise ValueError(f"{config_path}: albums.include must be 'all_shared_albums'")
+
+    patterns_raw = albums_data.get("exclude_name_patterns", [])
+    if patterns_raw is None:
+        patterns_raw = []
+    if not isinstance(patterns_raw, list) or not all(
+        isinstance(p, str) for p in patterns_raw
+    ):
+        raise ValueError(f"{config_path}: albums.exclude_name_patterns must be a list of strings")
+
+    return SharedAlbumsConfig(
+        scope=SharedAlbumsScopeConfig(
+            mode=scope_mode,
+            exclude_users=exclude_users,
+        ),
+        albums=SharedAlbumsAlbumConfig(
+            include=albums_include,
+            exclude_name_patterns=tuple(patterns_raw),
+        ),
+    )
 
 
 class Settings(BaseSettings):
@@ -150,14 +271,21 @@ class Settings(BaseSettings):
 
     @cached_property
     def sync_jobs(self) -> list[SyncJob]:
+        return self.sync_config.sync_jobs
+
+    @cached_property
+    def sync_config(self) -> AppConfig:
         # Check for YAML config file (env var override or default path)
         config_path = os.environ.get("CONFIG_FILE", self.config_file)
         if Path(config_path).is_file():
-            logger.info("Loading sync jobs from %s", config_path)
-            return load_sync_jobs(config_path)
+            logger.info("Loading config from %s", config_path)
+            return load_config(config_path)
 
         # Fallback: build jobs from env vars (backward compat)
         logger.info("No config.yaml found, using environment variables")
+        return AppConfig(sync_mode=SYNC_MODE_PATH_PREFIX, sync_jobs=self._sync_jobs_from_env())
+
+    def _sync_jobs_from_env(self) -> list[SyncJob]:
         album_id = self.target_album_uid
         jobs = []
         if self.shared_path_prefix:

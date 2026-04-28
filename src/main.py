@@ -4,7 +4,7 @@ import sys
 
 import asyncpg
 
-from src.config import settings
+from src.config import SYNC_MODE_SHARED_ALBUMS, settings
 from src.db import close_pool, execute, fetch_one, init_pool, reset_pool
 from src.health import start_health_server, stop_health_server
 from src.immich_api import ImmichAPI
@@ -204,11 +204,19 @@ def validate_config() -> bool:
         return False
 
     try:
-        jobs = settings.sync_jobs
+        config = settings.sync_config
     except (ValueError, FileNotFoundError) as e:
         logger.error("Configuration error: %s", e)
         return False
 
+    if config.sync_mode == SYNC_MODE_SHARED_ALBUMS:
+        logger.error(
+            "sync_mode=shared_albums is parsed but runtime album discovery "
+            "is not implemented yet"
+        )
+        return False
+
+    jobs = config.sync_jobs
     if not jobs:
         logger.error("No sync jobs configured. Create a config.yaml or set env vars (see README).")
         return False
