@@ -110,7 +110,7 @@ async def run_shared_albums_sync(api: ImmichAPI | None = None) -> dict[str, int]
             )
 
         async with transaction() as conn:
-            metadata_stats = await reconcile_shared_album_metadata(conn, api)
+            metadata_stats = await reconcile_shared_album_metadata(conn)
             for key, value in metadata_stats.items():
                 stats[key] += value
 

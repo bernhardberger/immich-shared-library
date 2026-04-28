@@ -109,7 +109,7 @@ class EventBatchProcessorTest(unittest.IsolatedAsyncioTestCase):
         event_sync.logger.disabled = True
         self.reconcile_calls = []
 
-        async def fake_reconcile(conn, api, *, source_asset_ids=None):
+        async def fake_reconcile(conn, *, source_asset_ids=None):
             self.reconcile_calls.append(set(source_asset_ids or []))
             return {"metadata_assets_updated": len(source_asset_ids or [])}
 
@@ -130,7 +130,7 @@ class EventBatchProcessorTest(unittest.IsolatedAsyncioTestCase):
             mapped_sources=[SOURCE_ASSET, SOURCE_ASSET],
         )
 
-        stats = await event_sync.process_pending_metadata_events(conn, api=object(), batch_size=10)
+        stats = await event_sync.process_pending_metadata_events(conn, batch_size=10)
 
         self.assertEqual(stats["events_claimed"], 4)
         self.assertEqual(stats["logical_sources_reconciled"], 1)
@@ -140,7 +140,7 @@ class EventBatchProcessorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(done_calls[0][1][0]), {1, 2, 3, 4})
 
     async def test_event_errors_are_marked_error_after_attempt_increment_on_claim(self) -> None:
-        async def failing_reconcile(conn, api, *, source_asset_ids=None):
+        async def failing_reconcile(conn, *, source_asset_ids=None):
             raise RuntimeError("boom")
 
         event_sync.reconcile_shared_album_metadata = failing_reconcile
@@ -149,7 +149,7 @@ class EventBatchProcessorTest(unittest.IsolatedAsyncioTestCase):
             mapped_sources=[SOURCE_ASSET],
         )
 
-        stats = await event_sync.process_pending_metadata_events(conn, api=object(), batch_size=10)
+        stats = await event_sync.process_pending_metadata_events(conn, batch_size=10)
 
         self.assertEqual(stats["events_claimed"], 1)
         self.assertEqual(stats["events_error"], 1)
@@ -161,7 +161,7 @@ class EventBatchProcessorTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("boom", error_calls[0][1][1])
 
     async def test_event_errors_are_marked_after_reconciliation_aborts_nested_transaction(self) -> None:
-        async def failing_reconcile(conn, api, *, source_asset_ids=None):
+        async def failing_reconcile(conn, *, source_asset_ids=None):
             conn.failed_transaction = True
             raise RuntimeError("simulated aborted transaction")
 
@@ -171,7 +171,7 @@ class EventBatchProcessorTest(unittest.IsolatedAsyncioTestCase):
             mapped_sources=[SOURCE_ASSET],
         )
 
-        stats = await event_sync.process_pending_metadata_events(conn, api=object(), batch_size=10)
+        stats = await event_sync.process_pending_metadata_events(conn, batch_size=10)
 
         self.assertEqual(stats["events_claimed"], 1)
         self.assertEqual(stats["events_error"], 1)
@@ -198,7 +198,7 @@ class EventDaemonTest(unittest.IsolatedAsyncioTestCase):
         self.reconcile_calls = []
         self.installs = []
 
-        async def fake_reconcile(conn, api, *, source_asset_ids=None):
+        async def fake_reconcile(conn, *, source_asset_ids=None):
             self.reconcile_calls.append(source_asset_ids)
             return {"metadata_assets_updated": len(source_asset_ids or [])}
 
@@ -236,7 +236,6 @@ class EventDaemonTest(unittest.IsolatedAsyncioTestCase):
         event_sync.transaction = fake_transaction
 
         await event_sync.run_event_daemon(
-            api=object(),
             poll_interval_seconds=0,
             debounce_seconds=0,
             batch_size=10,
@@ -258,7 +257,6 @@ class EventDaemonTest(unittest.IsolatedAsyncioTestCase):
         event_sync.transaction = fake_transaction
 
         await event_sync.run_event_daemon(
-            api=object(),
             poll_interval_seconds=0,
             debounce_seconds=0,
             batch_size=10,

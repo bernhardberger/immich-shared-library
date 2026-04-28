@@ -165,17 +165,16 @@ async def remove_metadata_trigger(conn: Any) -> None:
 
 async def reconcile_shared_album_metadata(
     conn: Any,
-    api: Any,
     *,
     source_asset_ids: set[UUID] | None = None,
 ) -> dict[str, int]:
     """Lazy wrapper so SQL helpers remain importable without runtime deps installed."""
     from src.shared_album_metadata import reconcile_shared_album_metadata as reconcile
 
-    return await reconcile(conn, api, source_asset_ids=source_asset_ids)
+    return await reconcile(conn, source_asset_ids=source_asset_ids)
 
 
-async def run_event_sync_once(conn: Any, api: Any, *, batch_size: int = 100) -> dict[str, int]:
+async def run_event_sync_once(conn: Any, *, batch_size: int = 100) -> dict[str, int]:
     """Process one bounded batch if this process can take the advisory lock."""
     locked = await conn.fetchval("SELECT pg_try_advisory_lock($1)", EVENT_DAEMON_ADVISORY_LOCK)
     if not locked:
@@ -186,7 +185,7 @@ async def run_event_sync_once(conn: Any, api: Any, *, batch_size: int = 100) -> 
             "logical_sources_reconciled": 0,
         }
     try:
-        return await process_pending_metadata_events(conn, api, batch_size=batch_size)
+        return await process_pending_metadata_events(conn, batch_size=batch_size)
     finally:
         await conn.execute("SELECT pg_advisory_unlock($1)", EVENT_DAEMON_ADVISORY_LOCK)
 
@@ -200,26 +199,25 @@ def _empty_event_stats() -> dict[str, int]:
     }
 
 
-async def process_pending_metadata_events_from_pool(api: Any, *, batch_size: int = 100) -> dict[str, int]:
+async def process_pending_metadata_events_from_pool(*, batch_size: int = 100) -> dict[str, int]:
     """Process one bounded event batch in a transaction-backed connection."""
     async with transaction() as conn:
         locked = await conn.fetchval("SELECT pg_try_advisory_xact_lock($1)", EVENT_DAEMON_ADVISORY_LOCK)
         if not locked:
             return _empty_event_stats()
-        return await process_pending_metadata_events(conn, api, batch_size=batch_size)
+        return await process_pending_metadata_events(conn, batch_size=batch_size)
 
 
-async def run_full_reconciliation_from_pool(api: Any) -> dict[str, int]:
+async def run_full_reconciliation_from_pool() -> dict[str, int]:
     """Run the periodic safety-net reconciliation in a transaction-backed connection."""
     async with transaction() as conn:
         locked = await conn.fetchval("SELECT pg_try_advisory_xact_lock($1)", EVENT_DAEMON_ADVISORY_LOCK)
         if not locked:
             return {}
-        return await reconcile_shared_album_metadata(conn, api)
+        return await reconcile_shared_album_metadata(conn)
 
 
 async def run_event_daemon(
-    api: Any,
     *,
     poll_interval_seconds: float = 30,
     debounce_seconds: float = 2,
@@ -234,11 +232,11 @@ async def run_event_daemon(
         if debounce_seconds > 0:
             await asyncio.sleep(debounce_seconds)
 
-        event_stats = await process_pending_metadata_events_from_pool(api, batch_size=batch_size)
+        event_stats = await process_pending_metadata_events_from_pool(batch_size=batch_size)
         full_stats = None
         now = time.monotonic()
         if now - last_full_reconcile_at >= full_reconcile_interval_seconds:
-            full_stats = await run_full_reconciliation_from_pool(api)
+            full_stats = await run_full_reconciliation_from_pool()
             last_full_reconcile_at = now
 
         logger.info(
@@ -255,7 +253,7 @@ async def run_event_daemon(
             await asyncio.sleep(poll_interval_seconds)
 
 
-async def process_pending_metadata_events(conn: Any, api: Any, *, batch_size: int = 100) -> dict[str, int]:
+async def process_pending_metadata_events(conn: Any, *, batch_size: int = 100) -> dict[str, int]:
     """Claim and process one bounded batch of pending metadata events.
 
     Event payloads are wake-up hints only. The reconciler rereads current DB state
@@ -296,7 +294,7 @@ async def process_pending_metadata_events(conn: Any, api: Any, *, batch_size: in
         async with conn.transaction():
             source_asset_ids = await _resolve_logical_source_asset_ids(conn, claimed)
             if source_asset_ids:
-                await reconcile_shared_album_metadata(conn, api, source_asset_ids=source_asset_ids)
+                await reconcile_shared_album_metadata(conn, source_asset_ids=source_asset_ids)
                 stats["logical_sources_reconciled"] = len(source_asset_ids)
             await _mark_events_done(conn, event_ids)
             stats["events_done"] = len(event_ids)
@@ -357,25 +355,21 @@ async def _mark_events_error(conn: Any, event_ids: list[int], exc: Exception) ->
 
 async def _run_daemon_entrypoint(args: argparse.Namespace) -> None:
     from src.db import close_pool, init_pool
-    from src.immich_api import ImmichAPI
     from src.schema import validate_schema
 
     await init_pool()
-    api = ImmichAPI()
     try:
         from src.main import ensure_tracking_tables
 
         await validate_schema()
         await ensure_tracking_tables()
         await run_event_daemon(
-            api,
             poll_interval_seconds=args.poll_interval_seconds,
             debounce_seconds=args.debounce_seconds,
             batch_size=args.batch_size,
             full_reconcile_interval_seconds=args.full_reconcile_interval_seconds,
         )
     finally:
-        await api.close()
         await close_pool()
 
 

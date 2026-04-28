@@ -10,9 +10,6 @@ from typing import Any, Mapping
 from uuid import UUID
 
 import asyncpg
-import httpx
-
-from src.immich_api import ImmichAPI
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +19,6 @@ _UNINITIALIZED = object()
 
 async def reconcile_shared_album_metadata(
     conn: asyncpg.Connection,
-    api: ImmichAPI,
     *,
     source_asset_ids: set[UUID] | None = None,
 ) -> dict[str, int]:
@@ -75,7 +71,7 @@ async def reconcile_shared_album_metadata(
                 if _value_key(current_value) == _value_key(desired_value):
                     continue
                 asset_id = UUID(str(row["asset_id"]))
-                applied = await _apply_api_update(conn, api, asset_id, field_group, desired_value)
+                applied = await _apply_metadata_update(conn, asset_id, field_group, desired_value)
                 if not applied:
                     blocked = True
                     await record_metadata_state(
@@ -87,7 +83,7 @@ async def reconcile_shared_album_metadata(
                     )
                     stats["metadata_conflicts"] += 1
                     logger.warning(
-                        "Shared metadata value cannot be represented through the Immich API; "
+                        "Shared metadata value cannot be represented by direct DB metadata sync; "
                         "source_asset_id=%s asset_id=%s field_group=%s value=%s",
                         source_asset_id,
                         asset_id,
@@ -229,49 +225,16 @@ def _field_value(row: Mapping[str, Any], field_group: str) -> Any:
     raise ValueError(f"unknown metadata field group: {field_group}")
 
 
-async def _apply_api_update(
+async def _apply_metadata_update(
     conn: asyncpg.Connection,
-    api: ImmichAPI,
     asset_id: UUID,
     field_group: str,
     value: Any,
 ) -> bool:
-    """Apply a reconciled value using only Immich API shapes accepted by v2.7.5."""
-    try:
-        if field_group == "taken_at":
-            if value.get("dateTimeOriginal") is None:
-                return False
-            # Immich v2.7.5's bulk endpoint persisted metadata reliably in live
-            # testing. timeZone cannot be sent alongside dateTimeOriginal.
-            await api.update_assets_metadata([asset_id], dateTimeOriginal=value.get("dateTimeOriginal"))
-            if value.get("timeZone") is not None:
-                await api.update_assets_metadata([asset_id], timeZone=value.get("timeZone"))
-            return True
-        if field_group == "location":
-            # The public DTO validates latitude/longitude as non-empty when either
-            # GPS field is present, so location clears are surfaced as conflicts.
-            if value.get("latitude") is None or value.get("longitude") is None:
-                return False
-            await api.update_assets_metadata([asset_id], latitude=value.get("latitude"), longitude=value.get("longitude"))
-            return True
-        if field_group == "description":
-            await api.update_assets_metadata([asset_id], description="" if value is None else value)
-            return True
-    except httpx.HTTPStatusError as exc:
-        if not _is_asset_update_access_denied(exc):
-            raise
-        await _apply_db_metadata_update(conn, asset_id, field_group, value)
-        return True
-    raise ValueError(f"unknown metadata field group: {field_group}")
+    """Apply a reconciled first-slice metadata value directly in Immich DB tables."""
+    if field_group == "location" and (value.get("latitude") is None or value.get("longitude") is None):
+        return False
 
-
-async def _apply_db_metadata_update(
-    conn: asyncpg.Connection,
-    asset_id: UUID,
-    field_group: str,
-    value: Any,
-) -> None:
-    """Fallback for mirror rows the Immich API key cannot update."""
     await conn.execute("SET LOCAL immich_shared_sidecar.suppress_events = 'on'")
     if field_group == "taken_at":
         taken_at = _datetime_db_value(value.get("dateTimeOriginal"))
@@ -297,7 +260,7 @@ async def _apply_db_metadata_update(
             asset_id,
             taken_at,
         )
-        return
+        return True
     if field_group == "location":
         await conn.execute(
             """
@@ -311,7 +274,7 @@ async def _apply_db_metadata_update(
             value.get("latitude"),
             value.get("longitude"),
         )
-        return
+        return True
     if field_group == "description":
         await conn.execute(
             """
@@ -323,24 +286,8 @@ async def _apply_db_metadata_update(
             asset_id,
             "" if value is None else value,
         )
-        return
+        return True
     raise ValueError(f"unknown metadata field group: {field_group}")
-
-
-def _is_asset_update_access_denied(exc: httpx.HTTPStatusError) -> bool:
-    response = exc.response
-    if response.status_code != 400:
-        return False
-    try:
-        body = response.json()
-    except ValueError:
-        body = response.text
-    if isinstance(body, Mapping):
-        message = body.get("message")
-        if isinstance(message, list):
-            return any("Not found or no asset.update access" in str(item) for item in message)
-        return "Not found or no asset.update access" in str(message)
-    return "Not found or no asset.update access" in str(body)
 
 
 def _is_empty_value(value: Any) -> bool:
