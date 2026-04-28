@@ -39,6 +39,23 @@ class FakeConnection:
         self.execute_calls.append((sql, args))
         return "UPDATE 1"
 
+    async def fetchval(self, sql, *args):
+        self.execute_calls.append((sql, args))
+        return True
+
+
+class FakeTransaction:
+    def __init__(self, conn, entered):
+        self.conn = conn
+        self.entered = entered
+
+    async def __aenter__(self):
+        self.entered.append(self.conn)
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
 
 @unittest.skipIf(
     EVENT_IMPORT_ERROR is not None,
@@ -131,6 +148,99 @@ class EventBatchProcessorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(error_calls), 1)
         self.assertEqual(error_calls[0][1][0], [1])
         self.assertIn("boom", error_calls[0][1][1])
+
+
+@unittest.skipIf(
+    EVENT_IMPORT_ERROR is not None,
+    f"missing dependency: {EVENT_IMPORT_ERROR.name if EVENT_IMPORT_ERROR else ''}",
+)
+class EventDaemonTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.original_transaction = event_sync.transaction
+        self.original_reconcile = event_sync.reconcile_shared_album_metadata
+        self.original_sleep = event_sync.asyncio.sleep
+        self.original_install_metadata_trigger = event_sync.install_metadata_trigger
+        self.original_install_event_queue = event_sync.install_event_queue
+        self.original_logger_disabled = event_sync.logger.disabled
+        event_sync.logger.disabled = True
+        self.entered_transactions = []
+        self.reconcile_calls = []
+        self.installs = []
+
+        async def fake_reconcile(conn, api, *, source_asset_ids=None):
+            self.reconcile_calls.append(source_asset_ids)
+            return {"metadata_assets_updated": len(source_asset_ids or [])}
+
+        async def fake_sleep(_seconds):
+            return None
+
+        async def fake_install_metadata_trigger(conn):
+            self.installs.append("metadata_trigger")
+
+        async def fake_install_event_queue(conn):
+            self.installs.append("event_queue")
+
+        event_sync.reconcile_shared_album_metadata = fake_reconcile
+        event_sync.asyncio.sleep = fake_sleep
+        event_sync.install_metadata_trigger = fake_install_metadata_trigger
+        event_sync.install_event_queue = fake_install_event_queue
+
+    async def asyncTearDown(self):
+        event_sync.transaction = self.original_transaction
+        event_sync.reconcile_shared_album_metadata = self.original_reconcile
+        event_sync.asyncio.sleep = self.original_sleep
+        event_sync.install_metadata_trigger = self.original_install_metadata_trigger
+        event_sync.install_event_queue = self.original_install_event_queue
+        event_sync.logger.disabled = self.original_logger_disabled
+
+    async def test_daemon_loop_processes_event_batches_with_transaction_backed_connections(self) -> None:
+        conn = FakeConnection(
+            claimed_rows=[{"id": 1, "entity_id": TARGET_ASSET_1, "source_asset_id": None}],
+            mapped_sources=[SOURCE_ASSET],
+        )
+
+        def fake_transaction():
+            return FakeTransaction(conn, self.entered_transactions)
+
+        event_sync.transaction = fake_transaction
+
+        await event_sync.run_event_daemon(
+            api=object(),
+            poll_interval_seconds=0,
+            debounce_seconds=0,
+            batch_size=10,
+            full_reconcile_interval_seconds=3600,
+            stop_after_iterations=1,
+        )
+
+        self.assertEqual(self.entered_transactions, [conn])
+        self.assertTrue(any("pg_try_advisory_xact_lock" in call[0] for call in conn.execute_calls))
+        self.assertEqual(self.reconcile_calls, [{SOURCE_ASSET}])
+        self.assertEqual(self.installs, [])
+
+    async def test_daemon_loop_invokes_periodic_full_reconciliation_when_interval_elapses(self) -> None:
+        conn = FakeConnection()
+
+        def fake_transaction():
+            return FakeTransaction(conn, self.entered_transactions)
+
+        event_sync.transaction = fake_transaction
+
+        await event_sync.run_event_daemon(
+            api=object(),
+            poll_interval_seconds=0,
+            debounce_seconds=0,
+            batch_size=10,
+            full_reconcile_interval_seconds=0,
+            stop_after_iterations=1,
+        )
+
+        self.assertIn(None, self.reconcile_calls)
+        self.assertEqual(self.installs, [])
+
+    def test_module_entrypoint_helper_imports_without_side_effects(self) -> None:
+        self.assertTrue(callable(event_sync.main))
+        self.assertEqual(self.installs, [])
 
 
 if __name__ == "__main__":

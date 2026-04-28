@@ -7,7 +7,10 @@ sidecar path does not install triggers or start a daemon.
 
 from __future__ import annotations
 
+import argparse
+import asyncio
 import logging
+import time
 from typing import Any
 from uuid import UUID
 
@@ -16,6 +19,13 @@ logger = logging.getLogger(__name__)
 EVENT_CHANNEL = "face_sync_events"
 METADATA_EVENT_TYPE = "asset_exif_changed"
 EVENT_DAEMON_ADVISORY_LOCK = 0xFACC0065
+
+
+def transaction():
+    """Return the repo DB transaction context manager, imported lazily for side-effect-light imports."""
+    from src.db import transaction as db_transaction
+
+    return db_transaction()
 
 EVENT_QUEUE_DDL = """
 CREATE TABLE IF NOT EXISTS _face_sync_event_queue (
@@ -181,6 +191,70 @@ async def run_event_sync_once(conn: Any, api: Any, *, batch_size: int = 100) -> 
         await conn.execute("SELECT pg_advisory_unlock($1)", EVENT_DAEMON_ADVISORY_LOCK)
 
 
+def _empty_event_stats() -> dict[str, int]:
+    return {
+        "events_claimed": 0,
+        "events_done": 0,
+        "events_error": 0,
+        "logical_sources_reconciled": 0,
+    }
+
+
+async def process_pending_metadata_events_from_pool(api: Any, *, batch_size: int = 100) -> dict[str, int]:
+    """Process one bounded event batch in a transaction-backed connection."""
+    async with transaction() as conn:
+        locked = await conn.fetchval("SELECT pg_try_advisory_xact_lock($1)", EVENT_DAEMON_ADVISORY_LOCK)
+        if not locked:
+            return _empty_event_stats()
+        return await process_pending_metadata_events(conn, api, batch_size=batch_size)
+
+
+async def run_full_reconciliation_from_pool(api: Any) -> dict[str, int]:
+    """Run the periodic safety-net reconciliation in a transaction-backed connection."""
+    async with transaction() as conn:
+        locked = await conn.fetchval("SELECT pg_try_advisory_xact_lock($1)", EVENT_DAEMON_ADVISORY_LOCK)
+        if not locked:
+            return {}
+        return await reconcile_shared_album_metadata(conn, api)
+
+
+async def run_event_daemon(
+    api: Any,
+    *,
+    poll_interval_seconds: float = 30,
+    debounce_seconds: float = 2,
+    batch_size: int = 100,
+    full_reconcile_interval_seconds: float = 3600,
+    stop_after_iterations: int | None = None,
+) -> None:
+    """Run a boring polling event daemon, disabled unless explicitly invoked."""
+    iteration = 0
+    last_full_reconcile_at = time.monotonic()
+    while True:
+        if debounce_seconds > 0:
+            await asyncio.sleep(debounce_seconds)
+
+        event_stats = await process_pending_metadata_events_from_pool(api, batch_size=batch_size)
+        full_stats = None
+        now = time.monotonic()
+        if now - last_full_reconcile_at >= full_reconcile_interval_seconds:
+            full_stats = await run_full_reconciliation_from_pool(api)
+            last_full_reconcile_at = now
+
+        logger.info(
+            "Event daemon iteration complete: iteration=%d event_stats=%s full_reconcile_stats=%s",
+            iteration + 1,
+            event_stats,
+            full_stats,
+        )
+
+        iteration += 1
+        if stop_after_iterations is not None and iteration >= stop_after_iterations:
+            return
+        if poll_interval_seconds > 0:
+            await asyncio.sleep(poll_interval_seconds)
+
+
 async def process_pending_metadata_events(conn: Any, api: Any, *, batch_size: int = 100) -> dict[str, int]:
     """Claim and process one bounded batch of pending metadata events.
 
@@ -278,3 +352,56 @@ async def _mark_events_error(conn: Any, event_ids: list[int], exc: Exception) ->
         event_ids,
         str(exc)[:1000],
     )
+
+
+async def _run_daemon_entrypoint(args: argparse.Namespace) -> None:
+    from src.db import close_pool, init_pool
+    from src.immich_api import ImmichAPI
+    from src.schema import validate_schema
+
+    await init_pool()
+    api = ImmichAPI()
+    try:
+        from src.main import ensure_tracking_tables
+
+        await validate_schema()
+        await ensure_tracking_tables()
+        await run_event_daemon(
+            api,
+            poll_interval_seconds=args.poll_interval_seconds,
+            debounce_seconds=args.debounce_seconds,
+            batch_size=args.batch_size,
+            full_reconcile_interval_seconds=args.full_reconcile_interval_seconds,
+        )
+    finally:
+        await api.close()
+        await close_pool()
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run the dormant Immich shared-album event sync daemon")
+    parser.add_argument("--poll-interval-seconds", type=float, default=30)
+    parser.add_argument("--debounce-seconds", type=float, default=2)
+    parser.add_argument("--batch-size", type=int, default=100)
+    parser.add_argument("--full-reconcile-interval-seconds", type=float, default=3600)
+    parser.add_argument("--log-level", default="INFO")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Module entrypoint for `python -m src.event_sync`.
+
+    This starts the daemon only; trigger installation remains explicit via helper
+    functions and is never performed from daemon startup.
+    """
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+    logging.basicConfig(
+        level=getattr(logging, str(args.log_level).upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    asyncio.run(_run_daemon_entrypoint(args))
+
+
+if __name__ == "__main__":
+    main()
