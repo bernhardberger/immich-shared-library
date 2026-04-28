@@ -29,6 +29,7 @@ from src.shared_album_tracking import (
     find_mirrored_target_asset_id,
     mark_album_justification,
     remove_stale_album_justifications,
+    _rows_affected,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,11 @@ def _empty_shared_album_stats() -> dict[str, int]:
         "shared_album_edges": 0,
         "album_justifications_marked": 0,
         "album_justifications_removed": 0,
+        "mirror_albums_created": 0,
+        "mirror_albums_reused": 0,
+        "mirror_album_assets_added": 0,
+        "mirror_album_assets_removed": 0,
+        "mirror_album_mappings_updated": 0,
         "shared_album_assets_cleaned": 0,
     }
 
@@ -90,6 +96,9 @@ async def run_shared_albums_sync(api: ImmichAPI | None = None) -> dict[str, int]
                 conn,
                 cycle_started_at,
             )
+            mirror_stats = await reconcile_shared_album_mirror_albums(conn)
+            for key, value in mirror_stats.items():
+                stats[key] += value
             stats["shared_album_assets_cleaned"] = await cleanup_orphaned_shared_album_assets(
                 conn,
                 config.shadow_library,
@@ -351,6 +360,191 @@ async def process_shared_album_edges(
             stats["album_justifications_marked"] += 1
 
     return stats
+
+
+def shared_album_mirror_description(source_album_id: UUID, target_user_id: UUID) -> str:
+    """Return the stable marker used to identify sidecar-managed mirror albums."""
+    return (
+        "Managed by immich-shared-library shared-albums mirror; "
+        f"source_album_id={source_album_id}; target_user_id={target_user_id}"
+    )
+
+
+async def reconcile_shared_album_mirror_albums(conn: asyncpg.Connection) -> dict[str, int]:
+    """Create/reuse target-user mirror albums and reconcile their membership."""
+    stats = {
+        "mirror_albums_created": 0,
+        "mirror_albums_reused": 0,
+        "mirror_album_assets_added": 0,
+        "mirror_album_assets_removed": 0,
+        "mirror_album_mappings_updated": 0,
+    }
+    album_name_column = await _optional_column_name(conn, "album", ["albumName", "name"])
+    if album_name_column is None:
+        raise RuntimeError("album table must have albumName or name column for shared-album mirrors")
+
+    map_rows = await conn.fetch(
+        f"""
+        SELECT
+            m.source_album_id,
+            m.target_user_id,
+            m.target_asset_id,
+            m.target_album_id,
+            sa."{album_name_column}" AS source_album_name
+        FROM _face_sync_album_map m
+        JOIN album sa ON sa.id = m.source_album_id
+        WHERE m.target_asset_id IS NOT NULL
+        """
+    )
+    pairs: dict[tuple[UUID, UUID], dict[str, Any]] = {}
+    for row in map_rows:
+        key = (row["source_album_id"], row["target_user_id"])
+        pair = pairs.setdefault(
+            key,
+            {
+                "source_album_name": row["source_album_name"],
+                "target_asset_ids": set(),
+                "candidate_album_ids": [],
+            },
+        )
+        pair["target_asset_ids"].add(row["target_asset_id"])
+        if row["target_album_id"] is not None:
+            pair["candidate_album_ids"].append(row["target_album_id"])
+
+    for (source_album_id, target_user_id), pair in pairs.items():
+        marker = shared_album_mirror_description(source_album_id, target_user_id)
+        target_album_id, created = await _find_or_create_shared_album_mirror_album(
+            conn,
+            source_album_id,
+            target_user_id,
+            str(pair["source_album_name"] or "Shared album"),
+            album_name_column,
+            marker,
+            pair["candidate_album_ids"],
+        )
+        if created:
+            stats["mirror_albums_created"] += 1
+        else:
+            stats["mirror_albums_reused"] += 1
+
+        own_asset_rows = await conn.fetch(
+            """
+            SELECT aa."assetId"
+            FROM album_asset aa
+            JOIN asset a ON a.id = aa."assetId"
+            WHERE aa."albumId" = $1
+              AND a."ownerId" = $2
+              AND a."deletedAt" IS NULL
+              AND COALESCE(a."isOffline", FALSE) = FALSE
+              AND (a.status IS NULL OR a.status = 'active')
+            """,
+            source_album_id,
+            target_user_id,
+        )
+        desired_asset_ids = set(pair["target_asset_ids"])
+        desired_asset_ids.update(row["assetId"] for row in own_asset_rows)
+
+        added_rows = await conn.fetch(
+            """
+            INSERT INTO album_asset ("albumId", "assetId")
+            SELECT $1, unnest($2::uuid[])
+            ON CONFLICT DO NOTHING
+            RETURNING "assetId"
+            """,
+            target_album_id,
+            list(desired_asset_ids),
+        )
+        removed_rows = await conn.fetch(
+            """
+            DELETE FROM album_asset
+            WHERE "albumId" = $1
+              AND NOT ("assetId" = ANY($2::uuid[]))
+            RETURNING "assetId"
+            """,
+            target_album_id,
+            list(desired_asset_ids),
+        )
+        added_count = len(added_rows)
+        removed_count = len(removed_rows)
+        stats["mirror_album_assets_added"] += added_count
+        stats["mirror_album_assets_removed"] += removed_count
+        if added_count or removed_count:
+            await conn.execute(
+                'UPDATE album SET "updatedAt" = $1 WHERE id = $2',
+                datetime.now(timezone.utc),
+                target_album_id,
+            )
+
+        update_result = await conn.execute(
+            """
+            UPDATE _face_sync_album_map
+            SET target_album_id = $3
+            WHERE source_album_id = $1
+              AND target_user_id = $2
+              AND target_album_id IS DISTINCT FROM $3
+            """,
+            source_album_id,
+            target_user_id,
+            target_album_id,
+        )
+        stats["mirror_album_mappings_updated"] += _rows_affected(update_result)
+
+    return stats
+
+
+async def _find_or_create_shared_album_mirror_album(
+    conn: asyncpg.Connection,
+    source_album_id: UUID,
+    target_user_id: UUID,
+    source_album_name: str,
+    album_name_column: str,
+    marker: str,
+    candidate_album_ids: list[UUID],
+) -> tuple[UUID, bool]:
+    if candidate_album_ids:
+        row = await conn.fetchrow(
+            """
+            SELECT id
+            FROM album
+            WHERE id = ANY($1::uuid[])
+              AND "ownerId" = $2
+              AND "deletedAt" IS NULL
+            LIMIT 1
+            """,
+            candidate_album_ids,
+            target_user_id,
+        )
+        if row is not None:
+            return row["id"], False
+
+    row = await conn.fetchrow(
+        """
+        SELECT id
+        FROM album
+        WHERE "ownerId" = $1
+          AND "deletedAt" IS NULL
+          AND description = $2
+        LIMIT 1
+        """,
+        target_user_id,
+        marker,
+    )
+    if row is not None:
+        return row["id"], False
+
+    row = await conn.fetchrow(
+        f"""
+        INSERT INTO album ("ownerId", "{album_name_column}", description)
+        VALUES ($1, $2, $3)
+        RETURNING id
+        """,
+        target_user_id,
+        f"{source_album_name} (Shared mirror)",
+        marker,
+    )
+    if row is None:
+        raise RuntimeError(f"failed to create shared-album mirror for {source_album_id} and {target_user_id}")
+    return row["id"], True
 
 
 async def ensure_shadow_library(

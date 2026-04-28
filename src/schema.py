@@ -62,6 +62,9 @@ REQUIRED_SCHEMA: dict[str, set[str]] = {
 }
 
 SHARED_ALBUMS_REQUIRED_SCHEMA: dict[str, set[str]] = {
+    "album": {
+        "description",
+    },
     "album_user": {
         "albumId", "userId", "role",
     },
@@ -120,6 +123,9 @@ INSERTED_COLUMNS: dict[str, set[str]] = {
     "person": {
         "id", "ownerId", "name", "thumbnailPath", "isHidden", "birthDate",
         "faceAssetId", "isFavorite", "color",
+    },
+    "album": {
+        "ownerId", "albumName", "name", "description",
     },
     "album_asset": {
         "albumId", "assetId",
