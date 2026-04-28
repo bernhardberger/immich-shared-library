@@ -253,6 +253,22 @@ class SharedAlbumMetadataSyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state_calls[-1][1][1], "description")
         self.assertEqual(state_calls[-1][1][2], '"Fasching"')
 
+    async def test_description_clear_db_fallback_writes_empty_string_not_null(self) -> None:
+        state = {(SOURCE_ASSET, "description"): "Ostern"}
+        conn = FakeConnection([
+            row(SOURCE_ASSET, description=None),
+            row(TARGET_ASSET_1, description="Ostern"),
+        ], state=state)
+        api = FakeAPI(denied_asset_ids={TARGET_ASSET_1})
+
+        stats = await reconcile_shared_album_metadata(conn, api)
+
+        self.assertEqual(stats["metadata_fields_propagated"], 1)
+        fallback_calls = [call for call in conn.execute_calls if 'UPDATE asset_exif' in call[0]]
+        self.assertEqual(len(fallback_calls), 1)
+        self.assertIn('description = $2', fallback_calls[0][0])
+        self.assertEqual(fallback_calls[0][1], (TARGET_ASSET_1, ""))
+
     async def test_successful_api_update_does_not_use_db_fallback(self) -> None:
         conn = FakeConnection([
             row(SOURCE_ASSET, description="Ostern"),

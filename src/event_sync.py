@@ -292,13 +292,14 @@ async def process_pending_metadata_events(conn: Any, api: Any, *, batch_size: in
     if not event_ids:
         return stats
 
-    source_asset_ids = await _resolve_logical_source_asset_ids(conn, claimed)
     try:
-        if source_asset_ids:
-            await reconcile_shared_album_metadata(conn, api, source_asset_ids=source_asset_ids)
-            stats["logical_sources_reconciled"] = len(source_asset_ids)
-        await _mark_events_done(conn, event_ids)
-        stats["events_done"] = len(event_ids)
+        async with conn.transaction():
+            source_asset_ids = await _resolve_logical_source_asset_ids(conn, claimed)
+            if source_asset_ids:
+                await reconcile_shared_album_metadata(conn, api, source_asset_ids=source_asset_ids)
+                stats["logical_sources_reconciled"] = len(source_asset_ids)
+            await _mark_events_done(conn, event_ids)
+            stats["events_done"] = len(event_ids)
     except Exception as exc:  # noqa: BLE001 - queue rows must record failures
         logger.exception("Failed to process shared metadata events: event_ids=%s", event_ids)
         await _mark_events_error(conn, event_ids, exc)

@@ -26,6 +26,8 @@ class FakeConnection:
         self.mapped_sources = mapped_sources or []
         self.fetch_calls = []
         self.execute_calls = []
+        self.transaction_entries = 0
+        self.failed_transaction = False
 
     async def fetch(self, sql, *args):
         self.fetch_calls.append((sql, args))
@@ -36,12 +38,17 @@ class FakeConnection:
         return []
 
     async def execute(self, sql, *args):
+        if self.failed_transaction and "status = 'error'" in sql:
+            raise RuntimeError("current transaction is aborted")
         self.execute_calls.append((sql, args))
         return "UPDATE 1"
 
     async def fetchval(self, sql, *args):
         self.execute_calls.append((sql, args))
         return True
+
+    def transaction(self):
+        return FakeTransaction(self, [])
 
 
 class FakeTransaction:
@@ -50,10 +57,14 @@ class FakeTransaction:
         self.entered = entered
 
     async def __aenter__(self):
+        if hasattr(self.conn, "transaction_entries"):
+            self.conn.transaction_entries += 1
         self.entered.append(self.conn)
         return self.conn
 
     async def __aexit__(self, exc_type, exc, tb):
+        if exc_type is not None and hasattr(self.conn, "failed_transaction"):
+            self.conn.failed_transaction = False
         return False
 
 
@@ -148,6 +159,26 @@ class EventBatchProcessorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(error_calls), 1)
         self.assertEqual(error_calls[0][1][0], [1])
         self.assertIn("boom", error_calls[0][1][1])
+
+    async def test_event_errors_are_marked_after_reconciliation_aborts_nested_transaction(self) -> None:
+        async def failing_reconcile(conn, api, *, source_asset_ids=None):
+            conn.failed_transaction = True
+            raise RuntimeError("simulated aborted transaction")
+
+        event_sync.reconcile_shared_album_metadata = failing_reconcile
+        conn = FakeConnection(
+            claimed_rows=[{"id": 1, "entity_id": TARGET_ASSET_1, "source_asset_id": None}],
+            mapped_sources=[SOURCE_ASSET],
+        )
+
+        stats = await event_sync.process_pending_metadata_events(conn, api=object(), batch_size=10)
+
+        self.assertEqual(stats["events_claimed"], 1)
+        self.assertEqual(stats["events_error"], 1)
+        self.assertEqual(conn.transaction_entries, 1)
+        error_calls = [call for call in conn.execute_calls if "status = 'error'" in call[0]]
+        self.assertEqual(len(error_calls), 1)
+        self.assertEqual(error_calls[0][1][0], [1])
 
 
 @unittest.skipIf(

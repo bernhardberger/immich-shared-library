@@ -321,7 +321,7 @@ async def _apply_db_metadata_update(
             WHERE "assetId" = $1
             """,
             asset_id,
-            value,
+            "" if value is None else value,
         )
         return
     raise ValueError(f"unknown metadata field group: {field_group}")
